@@ -1,0 +1,26 @@
+[
+  {
+    "name": "ascii",
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "key_id": "fixture",
+    "timestamp": "1793872800000",
+    "body": "{\"access_token\":\"test-token\",\"openid\":\"test-openid\"}",
+    "signature": "52b190c59f7c55e7dc24933a51781d845cc458ea49e729f4e613fdfb5db60c23"
+  },
+  {
+    "name": "escaped",
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "key_id": "fixture",
+    "timestamp": "1793872800000",
+    "body": "{\"access_token\":\"token<&=\\n\\\"\\\\\",\"openid\":\"openid/with+symbols=\"}",
+    "signature": "c3f8a65db924aa81711b50fca49a51ee0983ed4f77fc860306bf6730aee86f8f"
+  },
+  {
+    "name": "unicode",
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "key_id": "fixture",
+    "timestamp": "1793872800000",
+    "body": "{\"access_token\":\"令牌🙂\",\"openid\":\"标识é\"}",
+    "signature": "6ddd0c328be6f04fcd215a895a85a286624d38745269f3140c00e32114541696"
+  }
+]
