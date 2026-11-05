@@ -174,7 +174,7 @@ func TestResponseClosedAndEncodingBounds(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, raw := range [][]byte{[]byte("{"), []byte{255}, []byte(strings.Repeat(" ", maxRequestBytes+1)), []byte("")} {
+	for _, raw := range [][]byte{[]byte("{"), {255}, []byte(strings.Repeat(" ", maxRequestBytes+1)), []byte("")} {
 		client, err := New(cfg, WithJSONCodec(&countingCodec{raw: raw}))
 		if err != nil {
 			t.Fatal(err)

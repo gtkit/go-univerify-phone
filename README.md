@@ -174,3 +174,5 @@ go build -trimpath ./...
 本次版本经单独授权验证，vet、lint（0 issues）、modern（无差异）和全量 race 均已通过，语句覆盖率为 97.9%。刻意验证 nil context 的测试有一处附带理由的单行 SA1012 豁免。业务侧 Redis 和用户系统由接入服务实现；云函数部署见[配套说明](examples/unicloud/univerify/README.md)。
 
 版本记录见 [CHANGELOG.md](CHANGELOG.md)。官方依据：[一键登录](https://doc.dcloud.net.cn/uniCloud/uni-login/dev.html)、[云函数 URL 化](https://doc.dcloud.net.cn/uniCloud/http)、[环境变量](https://doc.dcloud.net.cn/uniCloud/cf-env-variables.html)。
+
+GitHub Actions 在 main 更新和 PR 时运行模块、格式、静态检查、Go/Node 测试及安全扫描，覆盖率下限为 80%。Go 版本取自 go.mod，检查工具固定版本。发布时先确认该提交的 CI 成功，再推送与 version.go 一致的附注版本标签；发布工作流会读取 CHANGELOG 的对应版本段落创建 GitHub Release，无需配置个人访问令牌。

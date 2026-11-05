@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify CI and publish release notes
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const fs = require('fs');
+            const version = context.ref.replace(/^refs\/tags\//, '');
+            const declared = fs.readFileSync('version.go', 'utf8').match(/^const Version = "([^"]+)"$/m);
+            if (!/^v\d+\.\d+\.\d+$/.test(version) || declared?.[1] !== version) {
+              throw new Error('Tag and version.go must contain the same release version');
+            }
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              ...context.repo,
+              workflow_id: 'ci.yml',
+              head_sha: context.sha,
+              event: 'push'
+            });
+            if (!data.workflow_runs.some(run => run.head_sha === context.sha && run.conclusion === 'success')) {
+              throw new Error('This commit must pass CI before publishing');
+            }
+            const lines = fs.readFileSync('CHANGELOG.md', 'utf8').split('\n');
+            const start = lines.findIndex(line => line.startsWith(`## [${version}] - `));
+            if (start < 0) throw new Error('CHANGELOG entry is missing');
+            let end = start + 1;
+            while (end < lines.length && !lines[end].startsWith('## ')) end++;
+            const body = lines.slice(start + 1, end).join('\n').trim();
+            if (!body) throw new Error('Release notes are empty');
+            try {
+              const existing = await github.rest.repos.getReleaseByTag({ ...context.repo, tag: version });
+              core.info(`Release already exists: ${existing.data.html_url}`);
+              return;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            const release = await github.rest.repos.createRelease({
+              ...context.repo,
+              tag_name: version,
+              name: version,
+              body,
+              draft: false,
+              prerelease: false
+            });
+            core.notice(`Published: ${release.data.html_url}`);

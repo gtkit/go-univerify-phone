@@ -10,6 +10,7 @@
 - 新增默认服务空间域名及 FunctionPath 配置，保留完整 Endpoint 优先覆盖。
 - 默认使用 Go encoding/json，支持 JSONCodec 实例注入。
 - 新增配置校验、分类错误、可执行示例和 Go/Node 本地协议测试。
+- 新增固定工具版本的 GitHub Actions CI，以及仅在同提交 CI 成功后创建 Release 的版本标签工作流。
 
 ### Changed
 
