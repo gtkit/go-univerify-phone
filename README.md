@@ -2,14 +2,14 @@
 
 通过配套的 uniCloud URL 化云函数，将 uni 一键登录的 `access_token`、`openid` 换成手机号。Go 包只负责取号；业务服务负责 Redis 限流、凭证去重、用户注册/登录和业务 token。
 
-当前代码版本为 `v0.3.0`，尚未创建发布 tag。module 为 `github.com/gtkit/go-univerify-phone`，实际包名为 `univerifygo`，要求 Go 1.27.3。
+当前版本为 `v0.4.0`。module 为 `github.com/gtkit/go-univerify-phone`，实际包名为 `univerify`，要求 Go 1.27.3。调用方保持 import 路径，使用 `univerify` 访问本包 API，无需指定导入别名。
 
 ## 安装与初始化
 
-版本发布后，按实际发布版本安装：
+安装指定版本：
 
 ```sh
-go get github.com/gtkit/go-univerify-phone
+go get github.com/gtkit/go-univerify-phone@v0.4.0
 ```
 
 唯一直接依赖是 `github.com/gtkit/httpc v1.8.0`。默认 JSON 使用 Go 原生 `encoding/json`，没有 Redis、JWT 或数据库依赖。
@@ -25,17 +25,17 @@ import (
 )
 
 // 在应用启动时构造并复用，不在每次请求里创建。
-func newPhoneClient() (*univerifygo.Client, error) {
-    return univerifygo.New(univerifygo.Config{
+func newPhoneClient() (*univerify.Client, error) {
+    return univerify.New(univerify.Config{
         FunctionPath:  "/univerify-phone",
         KeyID:         "current",
         SigningKeyEnv: "UV_SIGNING_KEY",
-    }, univerifygo.WithTimeout(5*time.Second))
+    }, univerify.WithTimeout(5*time.Second))
 }
 
 // ctx、accessToken 和 openID 来自已校验并通过限流/去重的业务请求。
-func getPhone(ctx context.Context, client *univerifygo.Client, accessToken, openID string) (string, error) {
-    return client.GetPhoneNumber(ctx, univerifygo.Request{
+func getPhone(ctx context.Context, client *univerify.Client, accessToken, openID string) (string, error) {
+    return client.GetPhoneNumber(ctx, univerify.Request{
         AccessToken: accessToken,
         OpenID:      openID,
     })
@@ -71,7 +71,7 @@ func (applicationJSON) Unmarshal(data []byte, v any) error {
     return json.Unmarshal(data, v)
 }
 
-// 构造时使用：univerifygo.WithJSONCodec(applicationJSON{})
+// 构造时使用：univerify.WithJSONCodec(applicationJSON{})
 ```
 
 实例必须支持并发、遵守 JSON 字段标签，不得修改响应输入或在返回后修改请求编码缓冲区。包复制一次编码结果后签名，并通过 `httpc.RawBody` 原样发送，不再由 httpc 编码。响应由同一实例解码，随后检查 HTTP 状态、协议 code 和手机号。nil/typed-nil 实例返回 `ErrInvalidArgument`。
@@ -155,7 +155,7 @@ POST
 | `errors.Is(err, ErrUnavailable)` | 传输、取消、超时或云函数配置不可用 |
 | `errors.Is(err, ErrInvalidResponse)` | 状态与正文不一致、缺手机号、类型错误或响应超限 |
 
-取消和超时同时支持 `errors.Is(err, context.Canceled)`、`errors.Is(err, context.DeadlineExceeded)`。`errors.AsType[*univerifygo.Error](err)` 可读取安全的 HTTP 状态、协议 code 和可选的数字 ProviderCode。
+取消和超时同时支持 `errors.Is(err, context.Canceled)`、`errors.Is(err, context.DeadlineExceeded)`。`errors.AsType[*univerify.Error](err)` 可读取安全的 HTTP 状态、协议 code 和可选的数字 ProviderCode。
 
 原始 transport/codec 错误可能包含敏感信息，因此不对外保留这些原始消息；只保留明确的取消/超时原因。错误类别不能用来推断“可以安全重试”。日志只记录 request ID、错误类别、状态及耗时，不记录凭证、签名、密钥或手机号。
 
@@ -171,6 +171,6 @@ go build -trimpath ./...
 
 测试包括原生/注入 JSON、签名向量、TLS、取消、并发、响应边界和 Go → 本地 Node 云函数入口。Node 侧使用取号替身；实际服务空间、App 真机及运营商尚未验证。
 
-默认域名增量经单独授权复跑，vet、lint（0 issues）、modern（无差异）和全量 race 均已通过，当前语句覆盖率为 97.9%。各次实际结果见实施计划。刻意验证 nil context 的测试有一处附带理由的单行 SA1012 豁免。未部署、未创建发布 tag，也未实现业务侧 Redis 或用户系统。
+本次版本经单独授权验证，vet、lint（0 issues）、modern（无差异）和全量 race 均已通过，语句覆盖率为 97.9%。刻意验证 nil context 的测试有一处附带理由的单行 SA1012 豁免。业务侧 Redis 和用户系统由接入服务实现；云函数部署见[配套说明](examples/unicloud/univerify/README.md)。
 
-技术约束见 [DESIGN.md](DESIGN.md)，执行状态见 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)。官方依据：[一键登录](https://doc.dcloud.net.cn/uniCloud/uni-login/dev.html)、[云函数 URL 化](https://doc.dcloud.net.cn/uniCloud/http)、[环境变量](https://doc.dcloud.net.cn/uniCloud/cf-env-variables.html)。
+版本记录见 [CHANGELOG.md](CHANGELOG.md)。官方依据：[一键登录](https://doc.dcloud.net.cn/uniCloud/uni-login/dev.html)、[云函数 URL 化](https://doc.dcloud.net.cn/uniCloud/http)、[环境变量](https://doc.dcloud.net.cn/uniCloud/cf-env-variables.html)。

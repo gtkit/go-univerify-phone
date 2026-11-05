@@ -1,4 +1,4 @@
-package univerifygo
+package univerify
 
 import (
 	"errors"
@@ -7,17 +7,17 @@ import (
 
 var (
 	// ErrInvalidArgument 表示配置、选项或调用参数不合法。
-	ErrInvalidArgument = errors.New("univerifygo: invalid argument")
+	ErrInvalidArgument = errors.New("univerify: invalid argument")
 	// ErrEncoding 表示注入的 JSON 实例无法序列化请求。
-	ErrEncoding = errors.New("univerifygo: encode request failed")
+	ErrEncoding = errors.New("univerify: encode request failed")
 	// ErrUnauthorized 表示云函数拒绝签名或时间戳。
-	ErrUnauthorized = errors.New("univerifygo: unauthorized")
+	ErrUnauthorized = errors.New("univerify: unauthorized")
 	// ErrUpstream 表示云函数未能取得运营商手机号。
-	ErrUpstream = errors.New("univerifygo: phone provider failed")
+	ErrUpstream = errors.New("univerify: phone provider failed")
 	// ErrUnavailable 表示传输失败、取消、超时或云函数不可用，不代表请求未被处理。
-	ErrUnavailable = errors.New("univerifygo: unavailable")
+	ErrUnavailable = errors.New("univerify: unavailable")
 	// ErrInvalidResponse 表示响应不符合约定或超过大小限制。
-	ErrInvalidResponse = errors.New("univerifygo: invalid response")
+	ErrInvalidResponse = errors.New("univerify: invalid response")
 )
 
 // Error 提供安全的错误详情。使用 errors.Is 判断类别，errors.AsType[*Error] 读取详情。
@@ -34,7 +34,7 @@ type Error struct {
 // Error 返回不包含凭证或上游原始文案的消息。
 func (e *Error) Error() string {
 	if e == nil || e.kind == nil {
-		return "univerifygo: unspecified error"
+		return "univerify: unspecified error"
 	}
 	if e.StatusCode != 0 {
 		return fmt.Sprintf("%s (HTTP %d)", e.kind, e.StatusCode)

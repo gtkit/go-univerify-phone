@@ -1,4 +1,4 @@
-package univerifygo_test
+package univerify_test
 
 import (
 	"context"
@@ -22,8 +22,8 @@ func (exampleJSON) Marshal(v any) ([]byte, error)      { return json.Marshal(v) 
 func (exampleJSON) Unmarshal(data []byte, v any) error { return json.Unmarshal(data, v) }
 
 func ExampleNew() {
-	_, err := univerifygo.New(univerifygo.Config{})
-	fmt.Println(errors.Is(err, univerifygo.ErrInvalidArgument))
+	_, err := univerify.New(univerify.Config{})
+	fmt.Println(errors.Is(err, univerify.ErrInvalidArgument))
 	// Output: true
 }
 
@@ -54,14 +54,14 @@ func ExampleClient_GetPhoneNumber() {
 		}
 	}))
 	defer server.Close()
-	client, err := univerifygo.New(univerifygo.Config{
+	client, err := univerify.New(univerify.Config{
 		Endpoint: server.URL, KeyID: "example", SigningKeyEnv: envName,
-	}, univerifygo.WithHTTPClient(server.Client()), univerifygo.WithTimeout(5*time.Second), univerifygo.WithJSONCodec(exampleJSON{}))
+	}, univerify.WithHTTPClient(server.Client()), univerify.WithTimeout(5*time.Second), univerify.WithJSONCodec(exampleJSON{}))
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	phone, err := client.GetPhoneNumber(context.Background(), univerifygo.Request{AccessToken: "example-token", OpenID: "example-openid"})
+	phone, err := client.GetPhoneNumber(context.Background(), univerify.Request{AccessToken: "example-token", OpenID: "example-openid"})
 	if err != nil {
 		fmt.Println(err)
 		return

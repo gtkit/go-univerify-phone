@@ -1,4 +1,4 @@
-package univerifygo
+package univerify
 
 import (
 	"bytes"
@@ -37,7 +37,7 @@ type Request struct {
 }
 
 // String 返回脱敏描述。
-func (Request) String() string { return "univerifygo.Request{[redacted]}" }
+func (Request) String() string { return "univerify.Request{[redacted]}" }
 
 // GoString 返回脱敏调试描述。
 func (r Request) GoString() string { return r.String() }
@@ -54,7 +54,7 @@ type Client struct {
 }
 
 // String 返回不包含内部配置或密钥的描述。
-func (Client) String() string { return "univerifygo.Client{[redacted]}" }
+func (Client) String() string { return "univerify.Client{[redacted]}" }
 
 // GoString 返回脱敏调试描述。
 func (c Client) GoString() string { return c.String() }

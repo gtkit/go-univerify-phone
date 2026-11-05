@@ -1,4 +1,4 @@
-package univerifygo
+package univerify
 
 import (
 	"context"
