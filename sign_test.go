@@ -1,7 +1,9 @@
 package univerify
 
 import (
-	"encoding/base64"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"testing"
@@ -14,12 +16,11 @@ func TestSignatureVectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	var vectors []struct {
-		Name      string `json:"name"`
-		Key       string `json:"key"`
-		KeyID     string `json:"key_id"`
-		Timestamp string `json:"timestamp"`
-		Body      string `json:"body"`
-		Signature string `json:"signature"`
+		Name        string `json:"name"`
+		Secret      string `json:"secret"`
+		AccessToken string `json:"access_token"`
+		OpenID      string `json:"openid"`
+		Message     string `json:"message"`
 	}
 	if err := json.Unmarshal(data, &vectors); err != nil {
 		t.Fatal(err)
@@ -27,12 +28,14 @@ func TestSignatureVectors(t *testing.T) {
 	for _, v := range vectors {
 		t.Run(v.Name, func(t *testing.T) {
 			t.Parallel()
-			key, err := base64.StdEncoding.DecodeString(v.Key)
-			if err != nil {
+			mac := hmac.New(sha256.New, []byte(v.Secret))
+			if _, err := mac.Write([]byte(v.Message)); err != nil {
 				t.Fatal(err)
 			}
-			if got := signature(key, v.KeyID, v.Timestamp, []byte(v.Body)); got != v.Signature {
-				t.Fatalf("signature=%s", got)
+			want := hex.EncodeToString(mac.Sum(nil))
+			got := signature([]byte(v.Secret), Request{AccessToken: v.AccessToken, OpenID: v.OpenID})
+			if got != want {
+				t.Fatalf("signature=%s, want %s", got, want)
 			}
 		})
 	}

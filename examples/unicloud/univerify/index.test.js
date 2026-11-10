@@ -7,176 +7,137 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { main } = require('./index.js')
 const vectors = JSON.parse(fs.readFileSync(path.join(__dirname, '../../../testdata/signatures.json'), 'utf8'))
-const key = Buffer.alloc(32)
-const now = 1793872800000
 
-function event(body = JSON.stringify({ access_token: 'token', openid: 'openid' }), timestamp = String(now), id = 'test', secret = key) {
-  const digest = crypto.createHash('sha256').update(body).digest('hex')
-  const signature = crypto.createHmac('sha256', secret)
-    .update(['univerify-go/v1', 'POST', id, timestamp, digest].join('\n')).digest('hex')
+function event(params = { openid: 'openid', access_token: 'token' }, secret = 'test-secret') {
+  const message = Object.keys(params).sort().map(key => key + '=' + params[key]).join('&')
+  const sign = crypto.createHmac('sha256', secret).update(message).digest('hex')
   return {
-    httpMethod: 'POST', isBase64Encoded: false, body,
-    headers: {
-      'content-type': 'application/json',
-      'x-univerify-key-id': id,
-      'x-univerify-timestamp': timestamp,
-      'x-univerify-signature': signature
-    }
+    httpMethod: 'POST',
+    headers: { 'content-type': 'application/json' },
+    isBase64Encoded: false,
+    body: JSON.stringify({ ...params, sign })
   }
 }
 
-test('云函数协议', async (t) => {
-  const saved = { appid: process.env.UV_APP_ID, keys: process.env.UV_SIGNING_KEYS, cloud: globalThis.uniCloud, now: Date.now }
+test('官方 POST 云函数协议', async (t) => {
+  const saved = { appid: process.env.UV_APP_ID, secret: process.env.UV_SECRET, cloud: globalThis.uniCloud }
   t.after(() => {
-    for (const [name, value] of [['UV_APP_ID', saved.appid], ['UV_SIGNING_KEYS', saved.keys]]) {
+    for (const [name, value] of [['UV_APP_ID', saved.appid], ['UV_SECRET', saved.secret]]) {
       if (value === undefined) delete process.env[name]
       else process.env[name] = value
     }
     if (saved.cloud === undefined) delete globalThis.uniCloud
     else globalThis.uniCloud = saved.cloud
-    Date.now = saved.now
   })
   let calls = 0
   t.beforeEach(() => {
     calls = 0
-    Date.now = () => now
     process.env.UV_APP_ID = 'test-app'
-    process.env.UV_SIGNING_KEYS = JSON.stringify({ test: key.toString('base64') })
+    process.env.UV_SECRET = 'test-secret'
     globalThis.uniCloud = { getPhoneNumber: async (args) => {
       calls++
       assert.equal(args.appid, 'test-app')
       assert.equal(args.provider, 'univerify')
-      return { code: 0, phoneNumber: '13800000000' }
+      return { code: 0, message: '', phoneNumber: '13800000000' }
     } }
   })
 
-  await t.test('有效请求及 Base64 事件', async () => {
-    for (const base64 of [false, true]) {
+  await t.test('普通与 Base64 正文直接返回官方结果', async () => {
+    for (const encoded of [false, true]) {
       const e = event()
-      if (base64) { e.body = Buffer.from(e.body).toString('base64'); e.isBase64Encoded = true }
-      const result = await main(e)
-      assert.equal(result.statusCode, 200)
-      assert.equal(result.mpserverlessComposedResponse, true)
-      assert.equal(result.headers['cache-control'], 'no-store')
-      assert.deepEqual(JSON.parse(result.body), { code: 'OK', phoneNumber: '13800000000' })
+      if (encoded) { e.body = Buffer.from(e.body).toString('base64'); e.isBase64Encoded = true }
+      assert.deepEqual(await main(e), { code: 0, message: '', phoneNumber: '13800000000' })
     }
     assert.equal(calls, 2)
   })
 
   for (const vector of vectors) {
-    await t.test(`跨语言向量 ${vector.name}`, async () => {
-      process.env.UV_SIGNING_KEYS = JSON.stringify({ [vector.key_id]: vector.key })
-      const e = event(vector.body, vector.timestamp, vector.key_id, Buffer.from(vector.key, 'base64'))
-      assert.equal(e.headers['x-univerify-signature'], vector.signature)
-      assert.equal((await main(e)).statusCode, 200)
+    await t.test('原始值签名 ' + vector.name, async () => {
+      process.env.UV_SECRET = vector.secret
+      const input = { openid: vector.openid, access_token: vector.access_token }
+      const e = event(input, vector.secret)
+      const expected = crypto.createHmac('sha256', vector.secret).update(vector.message).digest('hex')
+      assert.equal(JSON.parse(e.body).sign, expected)
+      globalThis.uniCloud.getPhoneNumber = async (args) => {
+        calls++
+        assert.equal(args.access_token, vector.access_token)
+        assert.equal(args.openid, vector.openid)
+        return { code: 0, phoneNumber: '13800000000' }
+      }
+      assert.equal((await main(e)).code, 0)
       assert.equal(calls, 1)
     })
   }
 
-  for (const delta of [-5001, -5000, 60000, 60001]) {
-    await t.test(`时间边界 ${delta}`, async () => {
-      const result = await main(event(undefined, String(now - delta)))
-      const accepted = delta >= -5000 && delta <= 60000
-      assert.equal(result.statusCode, accepted ? 200 : 401)
-      assert.equal(calls, accepted ? 1 : 0)
-    })
-  }
-
   const invalid = [
-    ['GET', (e) => { e.httpMethod = 'GET' }, 405],
-    ['无媒体类型', (e) => { delete e.headers['content-type'] }, 415],
-    ['错误媒体类型', (e) => { e.headers['content-type'] = 'text/plain' }, 415],
-    ['媒体类型换行', (e) => { e.headers['content-type'] += '\n' }, 415],
-    ['缺正文', (e) => { delete e.body }, 400],
-    ['错误 Base64 标志', (e) => { e.isBase64Encoded = 'true' }, 400],
-    ['无效 Base64', (e) => { e.isBase64Encoded = true; e.body = '!!!!' }, 400],
-    ['无效 UTF8', (e) => { e.isBase64Encoded = true; e.body = Buffer.from([255]).toString('base64') }, 400],
-    ['过大正文', (e) => { e.body = 'x'.repeat(32769) }, 413],
-    ['未知密钥', (e) => { e.headers['x-univerify-key-id'] = 'unknown' }, 401],
-    ['密钥编号换行', (e) => { e.headers['x-univerify-key-id'] += '\n' }, 401],
-    ['重复请求头', (e) => { e.headers['X-Univerify-Key-Id'] = 'test' }, 401],
-    ['数组请求头', (e) => { e.headers['x-univerify-key-id'] = ['test'] }, 401],
-    ['缺签名', (e) => { delete e.headers['x-univerify-signature'] }, 401],
-    ['篡改签名', (e) => { e.headers['x-univerify-signature'] = '0'.repeat(64) }, 401],
-    ['签名换行', (e) => { e.headers['x-univerify-signature'] += '\n' }, 401],
-    ['篡改正文', (e) => { e.body = e.body.replace('token', 'other') }, 401],
-    ['时间戳指数', (e) => { e.headers['x-univerify-timestamp'] = '1e12' }, 401],
-    ['时间戳换行', (e) => { e.headers['x-univerify-timestamp'] += '\n' }, 401]
+    ['GET', e => { e.httpMethod = 'GET' }],
+    ['缺少正文', e => { delete e.body }],
+    ['错误媒体类型', e => { e.headers['content-type'] = 'text/plain' }],
+    ['重复媒体类型', e => { e.headers['Content-Type'] = 'application/json' }],
+    ['无效 Base64 标志', e => { e.isBase64Encoded = 'true' }],
+    ['无效 Base64', e => { e.isBase64Encoded = true; e.body = '!!!!' }],
+    ['无效 UTF-8', e => { e.isBase64Encoded = true; e.body = Buffer.from([255]).toString('base64') }],
+    ['过大正文', e => { e.body = 'x'.repeat(32769) }],
+    ['非法 JSON', e => { e.body = '{' }],
+    ['null', e => { e.body = 'null' }],
+    ['数组', e => { e.body = '[]' }],
+    ['缺少 sign', e => { const p = JSON.parse(e.body); delete p.sign; e.body = JSON.stringify(p) }],
+    ['无效 sign', e => { const p = JSON.parse(e.body); p.sign = '0'.repeat(64); e.body = JSON.stringify(p) }],
+    ['篡改凭证', e => { e.body = e.body.replace('token', 'other') }],
+    ['多余字段', e => { const p = JSON.parse(e.body); p.appid = 'other'; e.body = JSON.stringify(p) }]
   ]
-  for (const [name, mutate, status] of invalid) {
+  for (const [name, mutate] of invalid) {
     await t.test(name, async () => {
       const e = event()
       mutate(e)
-      assert.equal((await main(e)).statusCode, status)
+      await assert.rejects(main(e))
       assert.equal(calls, 0)
     })
   }
 
-  for (const [name, body] of [
-    ['坏 JSON', '{'], ['null', 'null'], ['数组', '[]'], ['字段缺失', '{}'],
-    ['额外 appid', JSON.stringify({ access_token: 'token', openid: 'openid', appid: 'attacker-app' })],
-    ['空凭证', JSON.stringify({ access_token: '', openid: 'openid' })],
-    ['过长 token', JSON.stringify({ access_token: 't'.repeat(4097), openid: 'openid' })],
-    ['过长 openid', JSON.stringify({ access_token: 't', openid: 'o'.repeat(1025) })],
-    ['未配对代理字符', '{"access_token":"\\ud800","openid":"o"}']
+  for (const input of [
+    { access_token: '', openid: 'o' },
+    { access_token: 't'.repeat(4097), openid: 'o' },
+    { access_token: 't', openid: 'o'.repeat(1025) },
+    { access_token: '\ud800', openid: 'o' }
   ]) {
-    await t.test(name, async () => {
-      assert.equal((await main(event(body))).statusCode, 400)
+    await t.test('非法凭证', async () => {
+      await assert.rejects(main(event(input)), { message: '无效请求' })
       assert.equal(calls, 0)
     })
   }
 
-  await t.test('大小边界与头大小写', async () => {
-    let body = JSON.stringify({ access_token: 't'.repeat(4096), openid: 'o'.repeat(1024) })
-    body += ' '.repeat(32768 - Buffer.byteLength(body))
-    const e = event(body)
-    e.headers['X-Univerify-Key-Id'] = e.headers['x-univerify-key-id']
-    delete e.headers['x-univerify-key-id']
-    assert.equal((await main(e)).statusCode, 200)
-    assert.equal(calls, 1)
-  })
-
-  for (const encoded of ['', '{}', '{', '[]', JSON.stringify({ test: 'invalid' }), JSON.stringify({ test: key.toString('base64') + '\n' })]) {
-    await t.test(`非法密钥配置 ${encoded.length}`, async () => {
-      process.env.UV_SIGNING_KEYS = encoded
-      assert.equal((await main(event())).statusCode, 503)
+  for (const name of ['UV_APP_ID', 'UV_SECRET']) {
+    await t.test('缺失配置 ' + name, async () => {
+      delete process.env[name]
+      await assert.rejects(main(event()), { message: '配置不可用' })
       assert.equal(calls, 0)
     })
   }
 
-  await t.test('缺少 AppID', async () => {
-    delete process.env.UV_APP_ID
-    assert.equal((await main(event())).statusCode, 503)
-    assert.equal(calls, 0)
-  })
-
-  await t.test('双密钥轮换', async () => {
-    process.env.UV_SIGNING_KEYS = JSON.stringify({ test: key.toString('base64'), next: Buffer.alloc(32, 1).toString('base64') })
-    assert.equal((await main(event())).statusCode, 200)
-    assert.equal((await main(event(undefined, String(now), 'next', Buffer.alloc(32, 1)))).statusCode, 200)
-    assert.equal(calls, 2)
-  })
-
-  await t.test('上游数字错误码，无敏感错误文案', async () => {
-    globalThis.uniCloud.getPhoneNumber = async () => { calls++; throw { errCode: 5000, message: 'private-token-and-phone' } }
-    const result = await main(event())
-    assert.equal(result.statusCode, 502)
-    assert.deepEqual(JSON.parse(result.body), { code: 'UPSTREAM_ERROR', providerCode: 5000 })
+  await t.test('边界长度与 JSON 空白', async () => {
+    const e = event({ access_token: 't'.repeat(4096), openid: 'o'.repeat(1024) })
+    e.body += ' '.repeat(32768 - Buffer.byteLength(e.body))
+    assert.equal((await main(e)).code, 0)
     assert.equal(calls, 1)
-    assert.equal(result.body.includes('private'), false)
   })
 
-  await t.test('上游错误形状或手机号不合法', async () => {
-    for (const result of [null, { code: 0 }, { code: 0, phoneNumber: '+' }, { code: 0, phoneNumber: '13800000000\n' }, { code: 3, phoneNumber: '13800000000' }]) {
-      globalThis.uniCloud.getPhoneNumber = async () => result
-      assert.equal((await main(event())).statusCode, 502)
-    }
+  await t.test('直接返回非零官方 code', async () => {
+    globalThis.uniCloud.getPhoneNumber = async () => ({ code: 5000, message: 'provider failure' })
+    assert.deepEqual(await main(event()), { code: 5000, message: 'provider failure' })
   })
 
-  await t.test('窗口内重放是已记录的限制', async () => {
+  await t.test('上游异常原样传递', async () => {
+    const error = new Error('provider-original-error')
+    error.code = 5000
+    globalThis.uniCloud.getPhoneNumber = async () => { throw error }
+    await assert.rejects(main(event()), actual => actual === error)
+  })
+
+  await t.test('签名没有一次性语义', async () => {
     const e = event()
-    assert.equal((await main(e)).statusCode, 200)
-    assert.equal((await main(e)).statusCode, 200)
+    assert.equal((await main(e)).code, 0)
+    assert.equal((await main(e)).code, 0)
     assert.equal(calls, 2)
   })
 })

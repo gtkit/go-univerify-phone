@@ -8,9 +8,9 @@ import (
 var (
 	// ErrInvalidArgument 表示配置、选项或调用参数不合法。
 	ErrInvalidArgument = errors.New("univerify: invalid argument")
-	// ErrEncoding 表示注入的 JSON 实例无法序列化请求。
+	// ErrEncoding 表示请求编码结果不是有效 JSON 或超过大小限制；编码器自身错误直接透传。
 	ErrEncoding = errors.New("univerify: encode request failed")
-	// ErrUnauthorized 表示云函数拒绝签名或时间戳。
+	// ErrUnauthorized 表示云函数返回 HTTP 401 或 403。
 	ErrUnauthorized = errors.New("univerify: unauthorized")
 	// ErrUpstream 表示云函数未能取得运营商手机号。
 	ErrUpstream = errors.New("univerify: phone provider failed")

@@ -7,12 +7,12 @@ import (
 	"time"
 )
 
-// JSONCodec 负责请求序列化与响应反序列化。实现必须支持并发调用、遵守 JSON 字段标签，
-// 且不能修改或保留传入的响应字节。返回的请求字节在 Marshal 返回后须可安全复制。
+// JSONCodec 负责请求序列化，实现必须支持并发调用并遵守 JSON 字段标签。
+// 返回字节在 Marshal 返回后须可安全复制；GetPhoneNumber 不解码响应。
 type JSONCodec interface {
 	// Marshal 返回尊重 JSON 字段标签的编码结果。
 	Marshal(v any) ([]byte, error)
-	// Unmarshal 将 JSON 解码到 v，不得修改或保留 data。
+	// Unmarshal 保留现有接口兼容性，GetPhoneNumber 不调用此方法。
 	Unmarshal(data []byte, v any) error
 }
 

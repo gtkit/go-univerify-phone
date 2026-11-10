@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,12 +22,13 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/gtkit/httpc"
 )
 
 func testConfig(t testing.TB) Config {
 	t.Helper()
-	t.Setenv("UV_TEST_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	return Config{Endpoint: "https://example.invalid/verify", KeyID: "test", SigningKeyEnv: "UV_TEST_KEY"}
+	return Config{Endpoint: "https://example.invalid/verify", Secret: "test-secret"}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -39,25 +39,18 @@ func jsonResponse(status int, body string) *http.Response {
 	return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}
 }
 
-func TestDefaultDomainAndEndpointOverride(t *testing.T) {
+func TestEndpointAddress(t *testing.T) {
 	cfg := testConfig(t)
-	cases := []struct{ endpoint, path, want string }{
-		{"", "/univerify-phone", "https://env-00jy6yowysc0.dev-hz.cloudbasefunction.cn/univerify-phone"},
-		{"", "phone-login", "https://env-00jy6yowysc0.dev-hz.cloudbasefunction.cn/phone-login"},
-		{"", "/auth/phone", "https://env-00jy6yowysc0.dev-hz.cloudbasefunction.cn/auth/phone"},
-		{"", "/phone%20login", "https://env-00jy6yowysc0.dev-hz.cloudbasefunction.cn/phone%20login"},
-		{"https://override.invalid/custom", "https://ignored.invalid/?x=1", "https://override.invalid/custom"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.want, func(t *testing.T) {
-			cfg.Endpoint, cfg.FunctionPath = tc.endpoint, tc.path
+	for _, endpoint := range []string{"https://example.invalid/verify", "https://example.invalid/auth/phone%20login"} {
+		t.Run(endpoint, func(t *testing.T) {
+			cfg.Endpoint = endpoint
 			calls := 0
 			transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				calls++
-				if r.URL.String() != tc.want {
-					t.Errorf("URL=%q, want %q", r.URL.String(), tc.want)
+				if r.URL.String() != endpoint {
+					t.Errorf("URL=%q, want %q", r.URL.String(), endpoint)
 				}
-				return jsonResponse(200, `{"code":"OK","phoneNumber":"13800000000"}`), nil
+				return jsonResponse(200, `{"code":0,"phoneNumber":"13800000000"}`), nil
 			})
 			client, err := New(cfg, WithHTTPClient(&http.Client{Transport: transport}))
 			if err != nil {
@@ -73,12 +66,6 @@ func TestDefaultDomainAndEndpointOverride(t *testing.T) {
 				t.Fatalf("calls=%d", calls)
 			}
 		})
-	}
-	for _, path := range []string{"", "https://other.invalid/fn", "//other.invalid/fn", "///other.invalid/fn", "/fn?x=1", "/fn?", "/fn#fragment", "/fn#", "/bad%"} {
-		cfg.Endpoint, cfg.FunctionPath = "", path
-		if _, err := New(cfg); !errors.Is(err, ErrInvalidArgument) {
-			t.Fatalf("accepted path %q: %v", path, err)
-		}
 	}
 }
 
@@ -96,15 +83,15 @@ func TestNewValidation(t *testing.T) {
 		{name: "fragment", edit: func(c *Config) { c.Endpoint += "#" }},
 		{name: "bad url", edit: func(c *Config) { c.Endpoint = "://" }},
 		{name: "empty host", edit: func(c *Config) { c.Endpoint = "https:///verify" }},
-		{name: "key id", edit: func(c *Config) { c.KeyID = "bad\nkey" }},
-		{name: "missing env", edit: func(c *Config) { c.SigningKeyEnv = "UV_MISSING_TEST_KEY" }},
+		{name: "empty endpoint", edit: func(c *Config) { c.Endpoint = "" }},
+		{name: "empty secret", edit: func(c *Config) { c.Secret = "" }},
+		{name: "invalid secret", edit: func(c *Config) { c.Secret = "\xff" }},
 		{name: "zero timeout", opts: []Option{WithTimeout(0)}},
 		{name: "nil client", opts: []Option{WithHTTPClient(nil)}},
 		{name: "nil option", opts: []Option{nil}},
 		{name: "nil codec", opts: []Option{WithJSONCodec(nil)}},
 		{name: "typed nil codec", opts: []Option{WithJSONCodec((*countingCodec)(nil))}},
 	}
-	t.Setenv("UV_MISSING_TEST_KEY", "")
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := cfg
@@ -116,13 +103,16 @@ func TestNewValidation(t *testing.T) {
 			}
 		})
 	}
-	for _, value := range []string{"", "not-base64", base64.StdEncoding.EncodeToString(make([]byte, 31)), base64.StdEncoding.EncodeToString(make([]byte, 32)) + "\n"} {
-		t.Setenv("UV_TEST_KEY", value)
-		if _, err := New(cfg); !errors.Is(err, ErrInvalidArgument) {
-			t.Fatalf("bad key accepted: %v", err)
+	for _, secret := range []string{"s", "not-base64", "密钥🙂", strings.Repeat("x", 100)} {
+		cfg.Secret = secret
+		if _, err := New(cfg); err != nil {
+			t.Fatalf("valid raw secret rejected: %v", err)
 		}
 	}
 }
+
+var errTestCodec = errors.New("private-token-and-key")
+var errTestRead = errors.New("private-response")
 
 type countingCodec struct {
 	marshals   atomic.Int32
@@ -135,7 +125,7 @@ type countingCodec struct {
 func (c *countingCodec) Marshal(v any) ([]byte, error) {
 	c.marshals.Add(1)
 	if c.encodeErr {
-		return nil, errors.New("private-token-and-key")
+		return nil, errTestCodec
 	}
 	if c.raw != nil {
 		return c.raw, nil
@@ -154,11 +144,11 @@ func (b *trackedBody) Close() error               { b.closed = true; return nil 
 
 type brokenReader struct{}
 
-func (brokenReader) Read([]byte) (int, error) { return 0, errors.New("private-response") }
+func (brokenReader) Read([]byte) (int, error) { return 0, errTestRead }
 
 func TestResponseClosedAndEncodingBounds(t *testing.T) {
 	cfg := testConfig(t)
-	for _, reader := range []io.Reader{strings.NewReader(`{"code":"OK","phoneNumber":"13800000000"}`), brokenReader{}} {
+	for _, reader := range []io.Reader{strings.NewReader(`{"code":0,"phoneNumber":"13800000000"}`), brokenReader{}} {
 		body := &trackedBody{reader: reader}
 		client, err := New(cfg, WithHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: body}, nil
@@ -170,7 +160,7 @@ func TestResponseClosedAndEncodingBounds(t *testing.T) {
 		if !body.closed {
 			t.Fatal("response body not closed")
 		}
-		if _, broken := reader.(brokenReader); broken && !errors.Is(err, ErrUnavailable) {
+		if _, broken := reader.(brokenReader); broken && !errors.Is(err, errTestRead) {
 			t.Fatal(err)
 		}
 	}
@@ -195,7 +185,8 @@ func (c *countingCodec) Unmarshal(b []byte, v any) error {
 
 func TestSignedTLSAndCodec(t *testing.T) {
 	cfg := testConfig(t)
-	codec := &countingCodec{}
+	codec := &countingCodec{decodeErr: true}
+	const want = " \n{\"code\":0,\"message\":\"原样\",\"phoneNumber\":\"13800000000\",\"extra\":{\"value\":1}}\n"
 	var calls atomic.Int32
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -208,21 +199,33 @@ func TestSignedTLSAndCodec(t *testing.T) {
 		if r.Method != "POST" || r.Header.Get("Content-Type") != "application/json" {
 			t.Error("wrong method/content type")
 		}
+		for name := range r.Header {
+			if strings.HasPrefix(strings.ToLower(name), "x-univerify-") {
+				t.Error("custom signature header sent")
+			}
+		}
 		if !strings.Contains(string(body), "\n") {
 			t.Error("custom codec body was re-encoded")
 		}
-		digest := sha256.Sum256(body)
-		message := strings.Join([]string{"univerify-go/v1", "POST", "test", r.Header.Get("X-Univerify-Timestamp"), hex.EncodeToString(digest[:])}, "\n")
-		mac := hmac.New(sha256.New, make([]byte, 32))
-		if _, err := mac.Write([]byte(message)); err != nil {
+		var fields map[string]string
+		if err := json.Unmarshal(body, &fields); err != nil {
 			t.Error(err)
 			return
 		}
-		if r.Header.Get("X-Univerify-Signature") != hex.EncodeToString(mac.Sum(nil)) {
-			t.Error("signature mismatch")
+		if len(fields) != 3 || fields["access_token"] != "token<&=中文\n\"\\" || fields["openid"] != "openid+/" {
+			t.Errorf("request fields were changed or added")
+			return
+		}
+		mac := hmac.New(sha256.New, []byte(cfg.Secret))
+		if _, err := mac.Write([]byte("access_token=" + fields["access_token"] + "&openid=" + fields["openid"])); err != nil {
+			t.Error(err)
+			return
+		}
+		if fields["sign"] != hex.EncodeToString(mac.Sum(nil)) {
+			t.Error("official signature mismatch")
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		if _, err := io.WriteString(w, `{"code":"OK","phoneNumber":"13800000000"}`); err != nil {
+		if _, err := io.WriteString(w, want); err != nil {
 			t.Error(err)
 		}
 	}))
@@ -235,11 +238,11 @@ func TestSignedTLSAndCodec(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	phone, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "token<&=中文", OpenID: "openid"})
-	if err != nil || phone != "13800000000" {
-		t.Fatalf("phone=%q err=%v", phone, err)
+	data, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "token<&=中文\n\"\\", OpenID: "openid+/"})
+	if err != nil || string(data) != want {
+		t.Fatalf("data=%q err=%v", data, err)
 	}
-	if codec.marshals.Load() != 1 || codec.unmarshals.Load() != 1 || calls.Load() != 1 {
+	if codec.marshals.Load() != 1 || codec.unmarshals.Load() != 0 || calls.Load() != 1 {
 		t.Fatal("codec/request count mismatch")
 	}
 	if underlying.Timeout != originalTimeout || underlying.CheckRedirect != nil {
@@ -247,62 +250,63 @@ func TestSignedTLSAndCodec(t *testing.T) {
 	}
 }
 
-func TestResponseAndFailureClassification(t *testing.T) {
+func TestResponseAndErrorPassthrough(t *testing.T) {
 	cfg := testConfig(t)
 	cases := []struct {
 		name, body, contentType string
 		status                  int
-		want                    error
 	}{
-		{"success", `{"code":"OK","phoneNumber":"+8613800000000"}`, "application/json", 200, nil},
-		{"unauthorized", `{"code":"UNAUTHORIZED"}`, "application/json", 401, ErrUnauthorized},
-		{"upstream", `{"code":"UPSTREAM_ERROR","providerCode":5000}`, "application/json", 502, ErrUpstream},
-		{"unavailable", `{"code":"UNAVAILABLE"}`, "application/json", 503, ErrUnavailable},
-		{"input", `{"code":"INVALID_REQUEST"}`, "application/json", 400, ErrInvalidArgument},
-		{"large input", `{"code":"PAYLOAD_TOO_LARGE"}`, "application/json", 413, ErrInvalidArgument},
-		{"media", `{"code":"UNSUPPORTED_MEDIA_TYPE"}`, "application/json", 415, ErrInvalidArgument},
-		{"missing phone", `{"code":"OK"}`, "application/json", 200, ErrInvalidResponse},
-		{"only plus", `{"code":"OK","phoneNumber":"+"}`, "application/json", 200, ErrInvalidResponse},
-		{"invalid phone", `{"code":"OK","phoneNumber":"abc"}`, "application/json", 200, ErrInvalidResponse},
-		{"wrong status", `{"code":"OK","phoneNumber":"13800000000"}`, "application/json", 401, ErrInvalidResponse},
-		{"wrong code type", `{"code":0,"phoneNumber":"13800000000"}`, "application/json", 200, ErrInvalidResponse},
-		{"null", `null`, "application/json", 200, ErrInvalidResponse},
-		{"empty", "", "application/json", 200, ErrInvalidResponse},
-		{"html", "<html>private</html>", "text/html", 200, ErrInvalidResponse},
-		{"trailing value", `{"code":"OK","phoneNumber":"13800000000"}{}`, "application/json", 200, ErrInvalidResponse},
-		{"charset", `{}`, "application/json;charset=gbk", 200, ErrInvalidResponse},
-		{"too large", strings.Repeat(" ", maxResponseBytes+1), "application/json", 200, ErrInvalidResponse},
+		{"full success", " \n{\"code\":0,\"phoneNumber\":\"13800000000\",\"message\":\"原文\",\"extra\":{\"a\":1}}\n", "application/json", 200},
+		{"provider failure", "{\"code\":5000,\"message\":\"provider original error\",\"detail\":[1,2]}", "application/json", 200},
+		{"string code", "{\"code\":\"CUSTOM\",\"other\":true}", "application/json", 200},
+		{"invalid JSON", "{", "application/json", 200},
+		{"binary", "\xff\x00\x01", "application/octet-stream", 200},
+		{"empty", "", "", 204},
+		{"unauthorized", "{\"error\":\"original unauthorized\"}", "application/json", 401},
+		{"redirect", "original redirect", "text/plain", 307},
+		{"server failure", "<html>original upstream failure</html>", "text/html", 500},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls atomic.Int32
-			hc := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			client, err := New(cfg, WithHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 				calls.Add(1)
-				r := jsonResponse(tc.status, tc.body)
-				r.Header.Set("Content-Type", tc.contentType)
-				return r, nil
-			})}
-			c, err := New(cfg, WithHTTPClient(hc))
+				resp := jsonResponse(tc.status, tc.body)
+				resp.Header.Set("Content-Type", tc.contentType)
+				resp.Header.Set("X-Provider", "original-header")
+				return resp, nil
+			})}))
 			if err != nil {
 				t.Fatal(err)
 			}
-			phone, err := c.GetPhoneNumber(t.Context(), Request{AccessToken: "token", OpenID: "openid"})
-			if !errors.Is(err, tc.want) {
-				t.Fatalf("want %v, got %v", tc.want, err)
+			data, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "token", OpenID: "openid"})
+			if string(data) != tc.body {
+				t.Fatalf("body changed: %q", data)
 			}
-			if tc.want != nil && phone != "" {
-				t.Fatal("phone returned on failure")
-			}
-			if tc.name == "upstream" {
-				e, ok := errors.AsType[*Error](err)
-				if !ok || e.ProviderCode == nil || *e.ProviderCode != 5000 {
-					t.Fatal("provider code lost")
+			if tc.status < 200 || tc.status >= 300 {
+				httpErr, ok := errors.AsType[*httpc.HTTPError](err)
+				if !ok || httpErr.StatusCode != tc.status || string(httpErr.Body) != tc.body || httpErr.Header.Get("X-Provider") != "original-header" {
+					t.Fatalf("HTTP error not preserved: %v", err)
 				}
+			} else if err != nil {
+				t.Fatal(err)
 			}
 			if calls.Load() != 1 {
 				t.Fatal("request retried")
 			}
 		})
+	}
+	for _, status := range []int{200, 500} {
+		client, err := New(cfg, WithHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return jsonResponse(status, strings.Repeat("x", maxResponseBytes+1)), nil
+		})}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "t", OpenID: "o"})
+		if data != nil || !errors.Is(err, httpc.ErrResponseTooLarge) {
+			t.Fatalf("response limit lost: %v", err)
+		}
 	}
 }
 
@@ -311,7 +315,7 @@ func TestInputAndCodecFailures(t *testing.T) {
 	var calls atomic.Int32
 	hc := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		calls.Add(1)
-		return jsonResponse(200, `{"code":"OK","phoneNumber":"13800000000"}`), nil
+		return jsonResponse(200, `{"code":0,"phoneNumber":"13800000000"}`), nil
 	})}
 	c, err := New(cfg, WithHTTPClient(hc))
 	if err != nil {
@@ -333,23 +337,40 @@ func TestInputAndCodecFailures(t *testing.T) {
 	if calls.Load() != 0 {
 		t.Fatal("invalid input sent")
 	}
-	for _, encode := range []bool{true, false} {
-		codec := &countingCodec{encodeErr: encode, decodeErr: !encode}
-		client, err := New(cfg, WithHTTPClient(hc), WithJSONCodec(codec))
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = client.GetPhoneNumber(t.Context(), Request{AccessToken: "t", OpenID: "o"})
-		want := ErrInvalidResponse
-		if encode {
-			want = ErrEncoding
-		}
-		if !errors.Is(err, want) {
-			t.Fatal(err)
-		}
-		if strings.Contains(fmt.Sprintf("%+v %#v", err, err), "private-") {
-			t.Fatal("codec error leaked")
-		}
+	codec := &countingCodec{encodeErr: true}
+	client, err := New(cfg, WithHTTPClient(hc), WithJSONCodec(codec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "t", OpenID: "o"})
+	if err != errTestCodec || data != nil {
+		t.Fatalf("codec error changed: %v", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("encoding failure sent a request")
+	}
+}
+
+func TestTransportErrorPassthrough(t *testing.T) {
+	original := errors.New("original transport error")
+	client, err := New(testConfig(t), WithHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, original
+	})}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "t", OpenID: "o"})
+	if data != nil || !errors.Is(err, original) {
+		t.Fatalf("transport cause lost: %v", err)
+	}
+	if _, ok := errors.AsType[*url.Error](err); !ok {
+		t.Fatalf("transport type lost: %v", err)
+	}
+	if _, ok := errors.AsType[*Error](err); ok {
+		t.Fatal("transport error replaced by SDK error")
+	}
+	if !strings.Contains(err.Error(), original.Error()) {
+		t.Fatal("transport message changed")
 	}
 }
 
@@ -375,7 +396,7 @@ func TestContextAndNoRetry(t *testing.T) {
 	}
 	synctest.Test(t, func(t *testing.T) {
 		_, err := c.GetPhoneNumber(t.Context(), Request{AccessToken: "t", OpenID: "o"})
-		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrUnavailable) {
+		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatal(err)
 		}
 	})
@@ -397,8 +418,10 @@ func TestRedirectAndConcurrentCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.GetPhoneNumber(t.Context(), Request{AccessToken: "t", OpenID: "o"}); !errors.Is(err, ErrInvalidResponse) {
-		t.Fatal(err)
+	data, err := c.GetPhoneNumber(t.Context(), Request{AccessToken: "t", OpenID: "o"})
+	httpErr, ok := errors.AsType[*httpc.HTTPError](err)
+	if !ok || httpErr.StatusCode != 307 || string(data) != "{}" {
+		t.Fatalf("redirect response lost: %v", err)
 	}
 	if calls.Load() != 1 {
 		t.Fatal("redirect followed")
@@ -409,11 +432,15 @@ func TestRedirectAndConcurrentCalls(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		want := signature(make([]byte, 32), "test", r.Header.Get("X-Univerify-Timestamp"), body)
-		if r.Header.Get("X-Univerify-Signature") != want {
+		var fields map[string]string
+		if err := json.Unmarshal(body, &fields); err != nil {
+			return nil, err
+		}
+		want := signature([]byte(cfg.Secret), Request{AccessToken: fields["access_token"], OpenID: fields["openid"]})
+		if fields["sign"] != want {
 			t.Error("cross-request body/signature corruption")
 		}
-		return jsonResponse(200, `{"code":"OK","phoneNumber":"13800000000"}`), nil
+		return jsonResponse(200, `{"code":0,"phoneNumber":"13800000000"}`), nil
 	})}
 	c, err = New(cfg, WithHTTPClient(hc), WithJSONCodec(codec))
 	if err != nil {
@@ -429,14 +456,13 @@ func TestRedirectAndConcurrentCalls(t *testing.T) {
 		})
 	}
 	wg.Wait()
-	if codec.marshals.Load() != 32 || codec.unmarshals.Load() != 32 {
+	if codec.marshals.Load() != 32 || codec.unmarshals.Load() != 0 {
 		t.Fatal("concurrent codec counts")
 	}
 }
 
 func TestGoNodeProtocol(t *testing.T) {
 	cfg := testConfig(t)
-	// Node 监听本地 HTTP，Go TLS 入口原样转发正文；实际执行配套云函数。
 	const bridge = `
 const http = require('node:http');
 const {main} = require('./examples/unicloud/univerify/index.js');
@@ -445,6 +471,7 @@ globalThis.uniCloud = {getPhoneNumber: async (args) => {
   return {code: 0, phoneNumber: '13800000000'};
 }};
 const server = http.createServer(async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
   try {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -452,10 +479,9 @@ const server = http.createServer(async (req, res) => {
     const encoded = req.url === '/base64';
     const result = await main({httpMethod: req.method, headers: req.headers,
       isBase64Encoded: encoded, body: bytes.toString(encoded ? 'base64' : 'utf8')});
-    res.writeHead(result.statusCode, result.headers);
-    res.end(result.body);
+    res.writeHead(200); res.end(JSON.stringify(result));
   } catch {
-    res.writeHead(500); res.end();
+    res.writeHead(500); res.end('{}');
   }
 });
 server.listen(0, '127.0.0.1', () => process.stdout.write('http://127.0.0.1:' + server.address().port + '\n'));
@@ -464,7 +490,7 @@ process.stdin.on('end', () => { server.close(); server.closeAllConnections(); })
 `
 	processCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 10*time.Second)
 	cmd := exec.CommandContext(processCtx, "node", "-e", bridge)
-	cmd.Env = append(os.Environ(), "UV_APP_ID=test-app", "UV_SIGNING_KEYS="+`{"test":"`+base64.StdEncoding.EncodeToString(make([]byte, 32))+`"}`)
+	cmd.Env = append(os.Environ(), "UV_APP_ID=test-app", "UV_SECRET="+cfg.Secret)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
@@ -506,18 +532,27 @@ process.stdin.on('end', () => { server.close(); server.closeAllConnections(); })
 		if err != nil {
 			t.Fatal(err)
 		}
-		phone, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "token<&=中文", OpenID: "标识"})
-		if err != nil || phone != "13800000000" {
-			t.Fatalf("Go/Node %s: %q, %v", path, phone, err)
+		data, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "token<&=中文", OpenID: "标识"})
+		if err != nil || string(data) != "{\"code\":0,\"phoneNumber\":\"13800000000\"}" {
+			t.Fatalf("Go/Node %s: %q, %v", path, data, err)
 		}
 	}
 	cfg.Endpoint = server.URL
-	cfg.KeyID = "unknown"
+	cfg.Secret = "different-secret"
 	client, err := New(cfg, WithHTTPClient(server.Client()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "token", OpenID: "openid"}); !errors.Is(err, ErrUnauthorized) {
-		t.Fatalf("Go/Node must reject unknown key: %v", err)
+	data, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "token", OpenID: "openid"})
+	httpErr, ok := errors.AsType[*httpc.HTTPError](err)
+	if !ok || httpErr.StatusCode != 500 || string(data) != "{}" {
+		t.Fatalf("Go/Node error response changed: %q %v", data, err)
+	}
+}
+
+func TestCloudFunctionExample(t *testing.T) {
+	cmd := exec.CommandContext(t.Context(), "node", "--test", "examples/unicloud/univerify/index.test.js")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("cloud function tests: %v\n%s", err, output)
 	}
 }
