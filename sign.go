@@ -4,6 +4,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"sort"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -15,11 +17,33 @@ const (
 )
 
 func signature(key []byte, req Request) string {
-	// 按字段名排序后用原始值拼接，与官方 POST 示例一致。
-	message := "access_token=" + req.AccessToken + "&openid=" + req.OpenID
+	// 👉 在这里维护【参与签名的字段列表】，顺序无关，后面会排序
+	kv := map[string]string{
+		"access_token": req.AccessToken,
+		"openid":       req.OpenID,
+		//"app_id":       "__UNI__5B021A7",
+		//"provider":     "univerify",
+	}
+
+	keys := make([]string, 0, len(kv))
+	for k := range kv {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var buf strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			buf.WriteByte('&')
+		}
+		buf.WriteString(k)
+		buf.WriteByte('=')
+		buf.WriteString(kv[k])
+	}
+	message := buf.String()
+
 	mac := hmac.New(sha256.New, key)
-	// hash.Hash.Write 对所有输入均返回 nil error。
-	_, _ = mac.Write([]byte(message))
+	mac.Write([]byte(message))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
