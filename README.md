@@ -1,6 +1,6 @@
 # go-univerify-phone
 
-通过配套的 uniCloud URL 化云函数，将 uni 一键登录的 `access_token`、`openid` 换成手机号。Go 包只负责取号；业务服务负责 Redis 限流、凭证去重、用户注册/登录和业务 token。
+通过 uniCloud URL 化云函数，将 uni 一键登录的 `access_token`、`openid` 换成手机号。Go 包只负责取号；业务服务负责 Redis 限流、凭证去重、用户注册/登录和业务 token。
 
 当前版本为 `v0.4.0`。module 为 `github.com/gtkit/go-univerify-phone`，实际包名为 `univerify`，要求 Go 1.27.3。调用方保持 import 路径，使用 `univerify` 访问本包 API，无需指定导入别名。
 
@@ -14,7 +14,7 @@ go get github.com/gtkit/go-univerify-phone@v0.4.0
 
 唯一直接依赖是 `github.com/gtkit/httpc v1.8.0`。默认 JSON 使用 Go 原生 `encoding/json`，没有 Redis、JWT 或数据库依赖。
 
-Go 服务通过私有环境变量注入一个安全随机生成的 32 字节密钥，值为标准 Base64。不要把实际密钥放入 App、源码、示例或日志；云端使用相同 KeyID/密钥。
+Go 服务与云函数共享同一个原始密钥（非空 UTF-8 字符串），由服务端私有配置注入。不要把实际密钥放入 App、源码、示例或日志。
 
 ```go
 import (
@@ -25,11 +25,10 @@ import (
 )
 
 // 在应用启动时构造并复用，不在每次请求里创建。
-func newPhoneClient() (*univerify.Client, error) {
+func newPhoneClient(endpoint, secret string) (*univerify.Client, error) {
     return univerify.New(univerify.Config{
-        FunctionPath:  "/univerify-phone",
-        KeyID:         "current",
-        SigningKeyEnv: "UV_SIGNING_KEY",
+        Endpoint: endpoint, // URL 化云函数的完整 HTTPS 地址
+        Secret:   secret,   // 与云函数一致的原始密钥
     }, univerify.WithTimeout(5*time.Second))
 }
 
@@ -42,9 +41,7 @@ func getPhone(ctx context.Context, client *univerify.Client, accessToken, openID
 }
 ```
 
-省略 `Endpoint` 时，默认使用 `https://env-00jy6yowysc0.dev-hz.cloudbasefunction.cn`，与必填的 `FunctionPath` 组合。上例实际请求 `/univerify-phone`；你可以将路径改为 `phone-login` 或 `/phone-login`。默认域名属于指定服务空间，其他服务空间请显式设置完整 `Endpoint`，例如 `https://example.invalid/your-function`。
-
-非空 `Endpoint` 优先于 `FunctionPath`，保持已有完整地址用法；两者均由服务端配置，不接受 App 指定。`FunctionPath` 只接受纯路径，禁止绝对 URL、双斜杠开头、query、fragment、userinfo 和非法转义；完整 `Endpoint` 仍禁止 userinfo、query 和 fragment。
+`Endpoint` 是云函数 URL 化后的完整 HTTPS 地址，由服务端配置，不接受 App 指定；禁止 userinfo、query 和 fragment。
 
 ## JSON 实例注入
 
@@ -80,10 +77,8 @@ func (applicationJSON) Unmarshal(data []byte, v any) error {
 
 | 项目 | 默认值与约束 |
 | --- | --- |
-| `Config.Endpoint` | 可选的完整 HTTPS 地址；非空时优先并忽略 FunctionPath；留空则使用默认服务空间域名和 FunctionPath |
-| `Config.FunctionPath` | Endpoint 留空时必填；支持带或不带前导斜杠；不预设函数路径 |
-| `Config.KeyID` | 必填，云端配置的密钥编号，1–64 个 ASCII 字母、数字、下划线或连字符 |
-| `Config.SigningKeyEnv` | 必填，保存 Base64 密钥的环境变量名；缺失、空值、非规范 Base64 或解码后非 32 字节均失败 |
+| `Config.Endpoint` | 必填的完整 HTTPS 地址；禁止 userinfo、query 和 fragment；由服务端配置，不接受 App 指定 |
+| `Config.Secret` | 必填，与云函数一致的非空 UTF-8 原始密钥；来自服务端私有配置 |
 | `WithTimeout` | 默认 5 秒；必须为正；父 context 更早的取消或期限优先 |
 | `WithHTTPClient` | 默认由 httpc 创建；可注入 `*http.Client`，其值被复制，Transport 共享；仍禁止重定向与 Cookie Jar，仍设置本包超时 |
 | `WithJSONCodec` | 默认 encoding/json；可注入满足接口且并发安全的实例；不允许 nil |
@@ -101,7 +96,7 @@ App：uni.login(provider: univerify)
 Go 业务：校验 → 限流/额度 → Redis 原子凭证去重
   → client.GetPhoneNumber
 Go 包：httpc POST + HMAC-SHA256 + 时间戳
-  → 配套 URL 化云函数验签/校验时间窗
+  → URL 化云函数验签/校验时间窗
   → uniCloud.getPhoneNumber
   → 手机号返回 Go
 Go 业务：查询/注册用户 → 检查账号状态 → 提交事务 → 签发业务 token
@@ -122,27 +117,22 @@ App 成功取得两个凭证只代表授权步骤完成，不代表业务登录�
 
 ## 签名、云函数与安全边界
 
-云端文件位于 [examples/unicloud/univerify](examples/unicloud/univerify/README.md)。必须部署配套实现；它与官方示例的签名串不同。
+请求正文只含 `access_token`、`openid`，签名放在请求头：
 
-请求正文只含 `access_token`、`openid`。签名覆盖以下五项，以 LF 连接且无末尾换行：
+| 请求头 | 含义 |
+| --- | --- |
+| `X-UniVerify-Timestamp` | 十进制 Unix 秒时间戳 |
+| `X-UniVerify-Sign` | HMAC-SHA256 签名的小写 hex |
 
-```text
-univerify-go/v1
-POST
-<key_id>
-<Unix 毫秒时间戳>
-<原始 JSON 字节的 SHA256 小写 hex>
-```
+签名原文是 `timestamp + "\n" + 原始请求正文`。云函数以恒定时间比较签名，并校验时间窗；双方应同步时钟。
 
-使用共享密钥计算 HMAC-SHA256，小写 hex 放入 `X-Univerify-Signature`；另传 `X-Univerify-Key-Id`、`X-Univerify-Timestamp`。云函数以恒定时间比较签名，只接受 `-5000 <= 云端时间 - 请求时间 <= 60000` 毫秒。双方应同步时钟。
-
-成功响应为 HTTP 200 与 `{"code":"OK","phoneNumber":"..."}`。其余情况不会返回成功手机号。取号接口没有由本包承诺的幂等性；传输失败不代表运营商没有处理或扣费。
+响应为 HTTP 200 加 JSON：成功 `{"code":0,"phoneNumber":"..."}`；取号失败 `{"code":50201,"message":"一键登录取号失败","upstream":{...}}`。`GetPhoneNumber` 成功时直接返回手机号；`code != 0` 归类为 `ErrUpstream`，业务码进入 `Error.Code`，完整原始正文经 `Error.Body` 透传；响应无法解码、缺 code 或成功但缺手机号归类为 `ErrInvalidResponse`，同样携带原始正文。取号接口没有由本包承诺的幂等性；传输失败不代表运营商没有处理或扣费。
 
 本包禁止自动重定向和应用层重试，限制请求正文 32 KiB、响应解压后 16 KiB，凭证上限分别为 4096/1024 字节。格式化 Client/Request 时脱敏，但显式 JSON 序列化 Request 必然包含请求凭证，业务不能记录这些正文。
 
 本期不使用云端 Redis 或 nonce。**签名可防止无密钥者构造请求，时间戳只能缩短重放窗口；时间窗内已签名的请求仍可被直接重放给云函数。** Go 入口的 Redis 不能拦截此绕行请求。需要严格云端防重放时，应另行设计共享一次性记录。
 
-密钥轮换：云端先加入新 KeyID → Go 用新密钥构造新 Client → 旧请求排空并经过有效期后移除旧 KeyID。云端最多同时配置两把。泄露时立即撤销对应密钥，不关闭验签维持流量。
+更换密钥时先更新云端环境变量和 Go 配置并重建 Client，等待旧实例退出后即不再接受旧签名；泄露时立即撤销对应密钥，不关闭验签维持流量。
 
 ## 错误处理
 
@@ -150,14 +140,14 @@ POST
 | --- | --- |
 | `errors.Is(err, ErrInvalidArgument)` | 配置、选项、凭证或云端请求参数无效 |
 | `errors.Is(err, ErrEncoding)` | JSON 请求编码失败或返回非法 JSON/超大正文 |
-| `errors.Is(err, ErrUnauthorized)` | 签名、KeyID 或时间戳不被云端接受 |
+| `errors.Is(err, ErrUnauthorized)` | 签名或时间戳不被云端接受 |
 | `errors.Is(err, ErrUpstream)` | 云函数取号失败 |
 | `errors.Is(err, ErrUnavailable)` | 传输、取消、超时或云函数配置不可用 |
 | `errors.Is(err, ErrInvalidResponse)` | 状态与正文不一致、缺手机号、类型错误或响应超限 |
 
-取消和超时同时支持 `errors.Is(err, context.Canceled)`、`errors.Is(err, context.DeadlineExceeded)`。`errors.AsType[*univerify.Error](err)` 可读取安全的 HTTP 状态、协议 code 和可选的数字 ProviderCode。
+取消和超时同时支持 `errors.Is(err, context.Canceled)`、`errors.Is(err, context.DeadlineExceeded)`。`errors.AsType[*univerify.Error](err)` 可读取错误码 `Code`（云函数业务码的十进制字符串或本包内部错误标识）与错误响应的原始正文 `Body`（响应级错误时为响应字节，供调用方排障；成功路径不出现）。
 
-原始 transport/codec 错误可能包含敏感信息，因此不对外保留这些原始消息；只保留明确的取消/超时原因。错误类别不能用来推断“可以安全重试”。日志只记录 request ID、错误类别、状态及耗时，不记录凭证、签名、密钥或手机号。
+`Error` 的字符串输出包含原始正文（`body=...` 后缀），上游原始文案会随之进入任何 `err.Error()`/`%v` 输出路径；调用方自行决定记录与脱敏策略。原始 transport/codec 错误的私有消息仍然不对外保留；取消和超时原因除外。错误类别不能用来推断“可以安全重试”。日志建议只记录 request ID、错误类别、状态及耗时，凭证、签名、密钥或手机号不应进入日志。
 
 ## 验证与发布状态
 
@@ -165,14 +155,13 @@ POST
 
 ```sh
 go test -trimpath -vet=off -count=1 -timeout=2m ./...
-node --test examples/unicloud/univerify/index.test.js
 go build -trimpath ./...
 ```
 
-测试包括原生/注入 JSON、签名向量、TLS、取消、并发、响应边界和 Go → 本地 Node 云函数入口。Node 侧使用取号替身；实际服务空间、App 真机及运营商尚未验证。
+测试包括原生/注入 JSON、签名向量、TLS、取消、并发和响应边界。实际服务空间、App 真机及运营商尚未验证。
 
-本次版本经单独授权验证，vet、lint（0 issues）、modern（无差异）和全量 race 均已通过，语句覆盖率为 97.9%。刻意验证 nil context 的测试有一处附带理由的单行 SA1012 豁免。业务侧 Redis 和用户系统由接入服务实现；云函数部署见[配套说明](examples/unicloud/univerify/README.md)。
+本次版本经单独授权验证，vet、lint（0 issues）、modern（无差异）和全量 race 均已通过，语句覆盖率为 97.9%。刻意验证 nil context 的测试有一处附带理由的单行 SA1012 豁免。业务侧 Redis 和用户系统由接入服务实现。
 
 版本记录见 [CHANGELOG.md](CHANGELOG.md)。官方依据：[一键登录](https://doc.dcloud.net.cn/uniCloud/uni-login/dev.html)、[云函数 URL 化](https://doc.dcloud.net.cn/uniCloud/http)、[环境变量](https://doc.dcloud.net.cn/uniCloud/cf-env-variables.html)。
 
-GitHub Actions 在 main 更新和 PR 时运行模块、格式、静态检查、Go/Node 测试及安全扫描，覆盖率下限为 80%。Go 版本取自 go.mod，检查工具固定版本。发布时先确认该提交的 CI 成功，再推送与 version.go 一致的附注版本标签；发布工作流会读取 CHANGELOG 的对应版本段落创建 GitHub Release，无需配置个人访问令牌。
+GitHub Actions 在 main 更新和 PR 时运行模块、格式、静态检查、Go 测试及安全扫描，覆盖率下限为 80%。Go 版本取自 go.mod，检查工具固定版本。发布时先确认该提交的 CI 成功，再推送与 version.go 一致的附注版本标签；发布工作流会读取 CHANGELOG 的对应版本段落创建 GitHub Release，无需配置个人访问令牌。

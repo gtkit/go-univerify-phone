@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -112,64 +113,85 @@ func resolveEndpoint(cfg Config) (string, error) {
 	return endpoint, nil
 }
 
-// GetPhoneNumber 返回云函数响应的原始正文，不解析业务 code 或手机号。
+// GetPhoneNumber 调用云函数取号，成功时返回手机号。
+// 响应格式：成功 {"code":0,"phoneNumber":"..."}；
+// 业务失败 {"code":50201,"message":"一键登录取号失败","upstream":{...}}（HTTP 仍为 2xx）。
+// code != 0 返回 kind 为 ErrUpstream 的 *Error，Code 为业务码十进制字符串，完整原始正文经 Body 透传；
+// 响应无法解码、缺 code 或成功但缺手机号返回 ErrInvalidResponse，同样携带原始正文。
+// Error 字符串输出类别、业务码与原始正文；正文可能含上游原始文案，调用方自行决定记录与脱敏。
 // 请求编码、传输和读取错误直接返回；非 2xx 返回 httpc.HTTPError，正文仍会保留。
 // 默认超时与响应大小限制仍然生效，不自动重试。
-func (c *Client) GetPhoneNumber(ctx context.Context, req Request) ([]byte, error) {
+func (c *Client) GetPhoneNumber(ctx context.Context, req Request) (string, error) {
 	if c == nil || c.http == nil || c.codec == nil || ctx == nil {
-		return nil, failure(ErrInvalidArgument, "INVALID_CLIENT_OR_CONTEXT")
+		return "", failure(ErrInvalidArgument, "INVALID_CLIENT_OR_CONTEXT")
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return "", err
 	}
 	if !validCredential(req.AccessToken, maxTokenBytes) || !validCredential(req.OpenID, maxOpenIDBytes) {
-		return nil, failure(ErrInvalidArgument, "INVALID_CREDENTIAL")
+		return "", failure(ErrInvalidArgument, "INVALID_CREDENTIAL")
 	}
 	encoded, err := c.codec.Marshal(signedRequest{
-		//AppID:       "__UNI__5B021A7",
-		//Provider:    "univerify",
 		AccessToken: req.AccessToken,
 		OpenID:      req.OpenID,
-		Sign:        signature(c.key, req),
 	})
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	body := bytes.Clone(encoded)
 	if len(body) > maxRequestBytes || !utf8.Valid(body) || !json.Valid(body) {
-		return nil, failure(ErrEncoding, "INVALID_ENCODED_REQUEST")
+		return "", failure(ErrEncoding, "INVALID_ENCODED_REQUEST")
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	// 设置 headers，map[string]string格式
+	// 签名覆盖 timestamp + "\n" + 原始请求正文。
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
 	headers := map[string]string{
 		"Content-Type":          "application/json",
-		"x-univerify-timestamp": fmt.Sprintf("%d", time.Now().Unix()),
+		"X-UniVerify-Timestamp": timestamp,
+		"X-UniVerify-Sign":      signature(c.key, timestamp, body),
 	}
 
 	data, _, err := c.http.RequestRaw(requestCtx, http.MethodPost, c.endpoint, headers, httpc.RawBody(body))
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	// 解码 data, 格式：{"code":200,"message":""}
-	var response map[string]any
-	if err := c.codec.Unmarshal(data, &response); err != nil {
-		return nil, err
-	}
-	if code, ok := response["code"].(float64); ok && code != 200 {
-		return nil, fmt.Errorf("invalid signature: %v", response["message"])
-	}
-
-	return data, err
+	return c.decodePhoneNumber(data)
 }
 
-// signedRequest 是请求的 JSON 编码结构体。
+// successCode 是云函数响应信封中表示取号成功的业务码。
+const successCode = 0
+
+// decodePhoneNumber 解析云函数响应并提取手机号；所有响应级错误都经 Body 携带完整原始正文。
+func (c *Client) decodePhoneNumber(data []byte) (string, error) {
+	var resp cloudResponse
+	if err := c.codec.Unmarshal(data, &resp); err != nil {
+		return "", &Error{kind: ErrInvalidResponse, Code: "INVALID_RESPONSE_UNMARSHAL", Body: data}
+	}
+	if resp.Code == nil {
+		return "", &Error{kind: ErrInvalidResponse, Code: "MISSING_RESPONSE_CODE", Body: data}
+	}
+	if *resp.Code != successCode {
+		return "", &Error{kind: ErrUpstream, Code: strconv.Itoa(*resp.Code), Body: data}
+	}
+	if resp.PhoneNumber == "" {
+		return "", &Error{kind: ErrInvalidResponse, Code: "MISSING_PHONE_NUMBER", Body: data}
+	}
+	return resp.PhoneNumber, nil
+}
+
+// cloudResponse 是云函数响应；成功 {"code":0,"phoneNumber":"..."}，
+// 失败 {"code":非0,"message":"...","upstream":{...}}。
+// message 与 upstream 不逐字段解析，失败时完整正文经 Error.Body 透传给调用方。
+type cloudResponse struct {
+	Code        *int   `json:"code"`        // 业务码，指针用于区分缺失与 0。
+	PhoneNumber string `json:"phoneNumber"` // 成功时的手机号。
+}
+
+// signedRequest 是请求的 JSON 编码结构体；签名不在正文，走 X-UniVerify-Sign 头。
 type signedRequest struct {
-	//AppID       string `json:"app_id"`
-	//Provider    string `json:"provider"`
 	AccessToken string `json:"access_token"`
 	OpenID      string `json:"openid"`
-	Sign        string `json:"sign"`
 }

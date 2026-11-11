@@ -41,11 +41,11 @@ func ExampleClient_GetPhoneNumber() {
 		fmt.Println(err)
 		return
 	}
-	data, err := client.GetPhoneNumber(context.Background(), univerify.Request{AccessToken: "example-token", OpenID: "example-openid"})
+	phone, err := client.GetPhoneNumber(context.Background(), univerify.Request{AccessToken: "example-token", OpenID: "example-openid"})
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	fmt.Println(string(data))
-	// Output: {"code":0,"phoneNumber":"13800000000"}
+	fmt.Println(phone)
+	// Output: 13800000000
 }

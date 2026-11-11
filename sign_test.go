@@ -16,11 +16,10 @@ func TestSignatureVectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	var vectors []struct {
-		Name        string `json:"name"`
-		Secret      string `json:"secret"`
-		AccessToken string `json:"access_token"`
-		OpenID      string `json:"openid"`
-		Message     string `json:"message"`
+		Name      string `json:"name"`
+		Secret    string `json:"secret"`
+		Timestamp string `json:"timestamp"`
+		Body      string `json:"body"`
 	}
 	if err := json.Unmarshal(data, &vectors); err != nil {
 		t.Fatal(err)
@@ -28,12 +27,14 @@ func TestSignatureVectors(t *testing.T) {
 	for _, v := range vectors {
 		t.Run(v.Name, func(t *testing.T) {
 			t.Parallel()
+			// 协议约定：签名原文是 timestamp + "\n" + 原始正文，向量按同一拼接计算期望值。
+			message := v.Timestamp + "\n" + v.Body
 			mac := hmac.New(sha256.New, []byte(v.Secret))
-			if _, err := mac.Write([]byte(v.Message)); err != nil {
+			if _, err := mac.Write([]byte(message)); err != nil {
 				t.Fatal(err)
 			}
 			want := hex.EncodeToString(mac.Sum(nil))
-			got := signature([]byte(v.Secret), Request{AccessToken: v.AccessToken, OpenID: v.OpenID})
+			got := signature([]byte(v.Secret), v.Timestamp, []byte(v.Body))
 			if got != want {
 				t.Fatalf("signature=%s, want %s", got, want)
 			}

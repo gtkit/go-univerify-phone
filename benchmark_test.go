@@ -4,9 +4,9 @@ import "testing"
 
 func BenchmarkSign(b *testing.B) {
 	key := make([]byte, 32)
-	req := Request{AccessToken: "test-token", OpenID: "test-openid"}
+	body := []byte(`{"access_token":"test-token","openid":"test-openid"}`)
 	b.ReportAllocs()
 	for b.Loop() {
-		_ = signature(key, req)
+		_ = signature(key, "1762761600", body)
 	}
 }

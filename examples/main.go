@@ -11,11 +11,18 @@ import (
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintln(flag.CommandLine.Output(), "用法：设置以下环境变量后运行 go run ./examples")
-		fmt.Fprintln(flag.CommandLine.Output(), "  UNIVERIFY_ENDPOINT      云函数 HTTPS 地址")
-		fmt.Fprintln(flag.CommandLine.Output(), "  UNIVERIFY_SECRET        与云函数一致的原始密钥")
-		fmt.Fprintln(flag.CommandLine.Output(), "  UNIVERIFY_ACCESS_TOKEN  App 授权返回的 access_token")
-		fmt.Fprintln(flag.CommandLine.Output(), "  UNIVERIFY_OPENID        App 授权返回的 openid")
+		out := flag.CommandLine.Output()
+		for _, line := range []string{
+			"用法：设置以下环境变量后运行 go run ./examples",
+			"  UNIVERIFY_ENDPOINT      云函数 HTTPS 地址",
+			"  UNIVERIFY_SECRET        与云函数一致的原始密钥",
+			"  UNIVERIFY_ACCESS_TOKEN  App 授权返回的 access_token",
+			"  UNIVERIFY_OPENID        App 授权返回的 openid",
+		} {
+			if _, err := fmt.Fprintln(out, line); err != nil {
+				return
+			}
+		}
 	}
 	flag.Parse()
 
@@ -28,15 +35,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	data, err := client.GetPhoneNumber(context.Background(), univerify.Request{
+	phone, err := client.GetPhoneNumber(context.Background(), univerify.Request{
 		AccessToken: os.Getenv("UNIVERIFY_ACCESS_TOKEN"),
 		OpenID:      os.Getenv("UNIVERIFY_OPENID"),
 	})
-	if len(data) > 0 {
-		fmt.Printf("%s\n", data)
-	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	fmt.Println(phone)
 }

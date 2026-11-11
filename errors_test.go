@@ -22,7 +22,7 @@ func TestLocalErrorsAndFormatting(t *testing.T) {
 		t.Fatal("secret leaked in JSON")
 	}
 	var e *Error
-	if e.Unwrap() != nil || e.Is(ErrUpstream) || e.Error() == "" {
+	if e.Is(ErrUpstream) || e.Error() == "" {
 		t.Fatal("nil Error methods")
 	}
 }

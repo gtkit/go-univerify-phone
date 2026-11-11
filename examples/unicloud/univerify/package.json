@@ -1,7 +1,0 @@
-{
-  "name": "univerify-phone",
-  "main": "index.js",
-  "extensions": {
-    "uni-cloud-verify": {}
-  }
-}

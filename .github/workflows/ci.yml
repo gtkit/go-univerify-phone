@@ -29,9 +29,6 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '24.6.0'
       - name: Verify modules
         run: |
           go mod tidy -diff
@@ -60,7 +57,6 @@ jobs:
         run: |
           go build ./...
           go test -vet=off -race -count=1 -timeout=5m -covermode=atomic -coverprofile=coverage.out ./...
-          node --test examples/unicloud/univerify/index.test.js
       - name: Require coverage of at least 80 percent
         run: |
           go tool cover -func=coverage.out | awk '/^total:/ { seen=1; sub(/%$/, "", $3); print "Coverage: " $3 "%"; if ($3+0 < 80) exit 1 } END { if (!seen) exit 1 }'

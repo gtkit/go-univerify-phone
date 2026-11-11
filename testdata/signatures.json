@@ -2,22 +2,19 @@
   {
     "name": "ascii",
     "secret": "test-secret",
-    "access_token": "test-token",
-    "openid": "test-openid",
-    "message": "access_token=test-token&openid=test-openid"
-  },
-  {
-    "name": "escaped",
-    "secret": "short",
-    "access_token": "token<&=\n\"\\",
-    "openid": "openid/with+symbols=",
-    "message": "access_token=token<&=\n\"\\&openid=openid/with+symbols="
+    "timestamp": "1762761600",
+    "body": "{\"access_token\":\"test-token\",\"openid\":\"test-openid\"}"
   },
   {
     "name": "unicode",
     "secret": "测试密钥🙂",
-    "access_token": "令牌🙂",
-    "openid": "标识é",
-    "message": "access_token=令牌🙂&openid=标识é"
+    "timestamp": "1762761601",
+    "body": "{\"access_token\":\"令牌🙂\",\"openid\":\"标识é\"}"
+  },
+  {
+    "name": "escaped",
+    "secret": "short",
+    "timestamp": "1762761602",
+    "body": "{\"access_token\":\"token<&=\\n\\\"\\\\\",\"openid\":\"openid/with+symbols=\"}"
   }
 ]

@@ -2,7 +2,7 @@ package univerify
 
 import (
 	"errors"
-	"fmt"
+	"strings"
 )
 
 var (
@@ -20,26 +20,30 @@ var (
 	ErrInvalidResponse = errors.New("univerify: invalid response")
 )
 
-// Error 提供安全的错误详情。使用 errors.Is 判断类别，errors.AsType[*Error] 读取详情。
-// 不保留原始正文或任意传输/codec 错误；取消和超时仍可由 errors.Is 判断。
+// Error 携带完整的错误信息。使用 errors.Is 判断类别，errors.AsType[*Error] 读取详情。
+// 响应级错误保留原始正文（Body）并进入字符串输出，调用方日志与脱敏策略自行决定如何记录。
+// 取消和超时等传输错误直接透传，仍可由 errors.Is 判断。
 type Error struct {
-	_            struct{} // 强制使用字段名初始化。
-	StatusCode   int      // 收到的 HTTP 状态；未收到响应时为 0。
-	Code         string   // 本包或配套云函数的安全错误码，不包含上游原始消息。
-	ProviderCode *int64   // 可选的运营商数字错误码；未提供时为 nil。
-	kind         error
-	cause        error
+	_    struct{} // 强制使用字段名初始化。
+	Code string   // 错误码：云函数业务码（十进制字符串）或本包内部错误标识。
+	Body []byte   // 响应原始正文；本包内部错误（配置、编码等）为 nil。
+	kind error
 }
 
-// Error 返回不包含凭证或上游原始文案的消息。
+// Error 返回包含全部错误信息的消息：类别、错误码和响应原始正文（Body）；
+// 正文可能含上游原始文案，调用方自行决定如何记录与脱敏。
 func (e *Error) Error() string {
 	if e == nil || e.kind == nil {
 		return "univerify: unspecified error"
 	}
-	if e.StatusCode != 0 {
-		return fmt.Sprintf("%s (HTTP %d)", e.kind, e.StatusCode)
+	parts := []string{e.kind.Error()}
+	if e.Code != "" {
+		parts = append(parts, "code="+e.Code)
 	}
-	return e.kind.Error()
+	if len(e.Body) > 0 {
+		parts = append(parts, "body="+string(e.Body))
+	}
+	return strings.Join(parts, " ")
 }
 
 // GoString 避免调试格式输出内部字段。
@@ -47,13 +51,5 @@ func (e *Error) GoString() string { return e.Error() }
 
 // Is 支持按包级错误类别判断。
 func (e *Error) Is(target error) bool { return e != nil && target == e.kind }
-
-// Unwrap 只返回经过筛选的取消或超时原因。
-func (e *Error) Unwrap() error {
-	if e == nil {
-		return nil
-	}
-	return e.cause
-}
 
 func failure(kind error, code string) *Error { return &Error{kind: kind, Code: code} }

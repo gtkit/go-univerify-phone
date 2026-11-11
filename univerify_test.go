@@ -1,21 +1,15 @@
 package univerify
 
 import (
-	"bufio"
+	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/http/httputil"
 	"net/url"
-	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +19,8 @@ import (
 
 	"github.com/gtkit/httpc"
 )
+
+const successEnvelope = `{"code":0,"phoneNumber":"13800000000"}`
 
 func testConfig(t testing.TB) Config {
 	t.Helper()
@@ -50,7 +46,7 @@ func TestEndpointAddress(t *testing.T) {
 				if r.URL.String() != endpoint {
 					t.Errorf("URL=%q, want %q", r.URL.String(), endpoint)
 				}
-				return jsonResponse(200, `{"code":0,"phoneNumber":"13800000000"}`), nil
+				return jsonResponse(200, successEnvelope), nil
 			})
 			client, err := New(cfg, WithHTTPClient(&http.Client{Transport: transport}))
 			if err != nil {
@@ -59,8 +55,8 @@ func TestEndpointAddress(t *testing.T) {
 			if calls != 0 {
 				t.Fatal("New sent a request")
 			}
-			if _, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "token", OpenID: "openid"}); err != nil {
-				t.Fatal(err)
+			if phone, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "token", OpenID: "openid"}); err != nil || phone != "13800000000" {
+				t.Fatalf("phone=%q err=%v", phone, err)
 			}
 			if calls != 1 {
 				t.Fatalf("calls=%d", calls)
@@ -134,6 +130,14 @@ func (c *countingCodec) Marshal(v any) ([]byte, error) {
 	return b, err
 }
 
+func (c *countingCodec) Unmarshal(b []byte, v any) error {
+	c.unmarshals.Add(1)
+	if c.decodeErr {
+		return errors.New("private-phone-and-key")
+	}
+	return json.Unmarshal(b, v)
+}
+
 type trackedBody struct {
 	reader io.Reader
 	closed bool
@@ -148,7 +152,7 @@ func (brokenReader) Read([]byte) (int, error) { return 0, errTestRead }
 
 func TestResponseClosedAndEncodingBounds(t *testing.T) {
 	cfg := testConfig(t)
-	for _, reader := range []io.Reader{strings.NewReader(`{"code":0,"phoneNumber":"13800000000"}`), brokenReader{}} {
+	for _, reader := range []io.Reader{strings.NewReader(successEnvelope), brokenReader{}} {
 		body := &trackedBody{reader: reader}
 		client, err := New(cfg, WithHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: body}, nil
@@ -175,18 +179,9 @@ func TestResponseClosedAndEncodingBounds(t *testing.T) {
 	}
 }
 
-func (c *countingCodec) Unmarshal(b []byte, v any) error {
-	c.unmarshals.Add(1)
-	if c.decodeErr {
-		return errors.New("private-phone-and-key")
-	}
-	return json.Unmarshal(b, v)
-}
-
 func TestSignedTLSAndCodec(t *testing.T) {
 	cfg := testConfig(t)
-	codec := &countingCodec{decodeErr: true}
-	const want = " \n{\"code\":0,\"message\":\"原样\",\"phoneNumber\":\"13800000000\",\"extra\":{\"value\":1}}\n"
+	codec := &countingCodec{}
 	var calls atomic.Int32
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -199,11 +194,6 @@ func TestSignedTLSAndCodec(t *testing.T) {
 		if r.Method != "POST" || r.Header.Get("Content-Type") != "application/json" {
 			t.Error("wrong method/content type")
 		}
-		for name := range r.Header {
-			if strings.HasPrefix(strings.ToLower(name), "x-univerify-") {
-				t.Error("custom signature header sent")
-			}
-		}
 		if !strings.Contains(string(body), "\n") {
 			t.Error("custom codec body was re-encoded")
 		}
@@ -212,20 +202,16 @@ func TestSignedTLSAndCodec(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		if len(fields) != 3 || fields["access_token"] != "token<&=中文\n\"\\" || fields["openid"] != "openid+/" {
-			t.Errorf("request fields were changed or added")
+		if len(fields) != 2 || fields["access_token"] != "token<&=中文\n\"\\" || fields["openid"] != "openid+/" {
+			t.Errorf("request fields were changed or added: %v", fields)
 			return
 		}
-		mac := hmac.New(sha256.New, []byte(cfg.Secret))
-		if _, err := mac.Write([]byte("access_token=" + fields["access_token"] + "&openid=" + fields["openid"])); err != nil {
-			t.Error(err)
-			return
-		}
-		if fields["sign"] != hex.EncodeToString(mac.Sum(nil)) {
-			t.Error("official signature mismatch")
+		timestamp := r.Header.Get("X-UniVerify-Timestamp")
+		if sign := r.Header.Get("X-UniVerify-Sign"); sign == "" || sign != signature([]byte(cfg.Secret), timestamp, body) {
+			t.Error("header signature mismatch")
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		if _, err := io.WriteString(w, want); err != nil {
+		if _, err := io.WriteString(w, successEnvelope); err != nil {
 			t.Error(err)
 		}
 	}))
@@ -238,11 +224,11 @@ func TestSignedTLSAndCodec(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "token<&=中文\n\"\\", OpenID: "openid+/"})
-	if err != nil || string(data) != want {
-		t.Fatalf("data=%q err=%v", data, err)
+	phone, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "token<&=中文\n\"\\", OpenID: "openid+/"})
+	if err != nil || phone != "13800000000" {
+		t.Fatalf("phone=%q err=%v", phone, err)
 	}
-	if codec.marshals.Load() != 1 || codec.unmarshals.Load() != 0 || calls.Load() != 1 {
+	if codec.marshals.Load() != 1 || codec.unmarshals.Load() != 1 || calls.Load() != 1 {
 		t.Fatal("codec/request count mismatch")
 	}
 	if underlying.Timeout != originalTimeout || underlying.CheckRedirect != nil {
@@ -250,21 +236,27 @@ func TestSignedTLSAndCodec(t *testing.T) {
 	}
 }
 
-func TestResponseAndErrorPassthrough(t *testing.T) {
+func TestResponseEnvelopeAndErrorPassthrough(t *testing.T) {
 	cfg := testConfig(t)
 	cases := []struct {
-		name, body, contentType string
-		status                  int
+		name, body, contentType, phone, code string
+		status                               int
+		wantKind                             error
+		httpPassthrough                      bool
 	}{
-		{"full success", " \n{\"code\":0,\"phoneNumber\":\"13800000000\",\"message\":\"原文\",\"extra\":{\"a\":1}}\n", "application/json", 200},
-		{"provider failure", "{\"code\":5000,\"message\":\"provider original error\",\"detail\":[1,2]}", "application/json", 200},
-		{"string code", "{\"code\":\"CUSTOM\",\"other\":true}", "application/json", 200},
-		{"invalid JSON", "{", "application/json", 200},
-		{"binary", "\xff\x00\x01", "application/octet-stream", 200},
-		{"empty", "", "", 204},
-		{"unauthorized", "{\"error\":\"original unauthorized\"}", "application/json", 401},
-		{"redirect", "original redirect", "text/plain", 307},
-		{"server failure", "<html>original upstream failure</html>", "text/html", 500},
+		{"full success", " \n" + successEnvelope + "\n", "application/json", "13800000000", "", 200, nil, false},
+		{"provider failure", `{"code":50201,"message":"一键登录取号失败","upstream":{"stage":"exception","code":5000,"message":"获取手机号失败，请稍后重试。","hasPhoneNumber":false,"fields":["errMsg"]}}`, "application/json", "", "50201", 200, ErrUpstream, false},
+		{"unknown business code", `{"code":41777,"message":"x"}`, "application/json", "", "41777", 200, ErrUpstream, false},
+		{"success without phone", `{"code":0}`, "application/json", "", "", 200, ErrInvalidResponse, false},
+		{"success with empty phone", `{"code":0,"phoneNumber":""}`, "application/json", "", "", 200, ErrInvalidResponse, false},
+		{"missing code", `{"message":"x"}`, "application/json", "", "", 200, ErrInvalidResponse, false},
+		{"string code", `{"code":"CUSTOM","other":true}`, "application/json", "", "", 200, ErrInvalidResponse, false},
+		{"invalid JSON", "{", "application/json", "", "", 200, ErrInvalidResponse, false},
+		{"binary", "\xff\x00\x01", "application/octet-stream", "", "", 200, ErrInvalidResponse, false},
+		{"empty", "", "", "", "", 204, ErrInvalidResponse, false},
+		{"unauthorized", `{"error":"original unauthorized"}`, "application/json", "", "", 401, nil, true},
+		{"redirect", "original redirect", "text/plain", "", "", 307, nil, true},
+		{"server failure", "<html>original upstream failure</html>", "text/html", "", "", 500, nil, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -279,22 +271,64 @@ func TestResponseAndErrorPassthrough(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			data, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "token", OpenID: "openid"})
-			if string(data) != tc.body {
-				t.Fatalf("body changed: %q", data)
+			phone, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "token", OpenID: "openid"})
+			if phone != tc.phone {
+				t.Fatalf("phone=%q, want %q", phone, tc.phone)
 			}
-			if tc.status < 200 || tc.status >= 300 {
+			switch {
+			case tc.httpPassthrough:
 				httpErr, ok := errors.AsType[*httpc.HTTPError](err)
 				if !ok || httpErr.StatusCode != tc.status || string(httpErr.Body) != tc.body || httpErr.Header.Get("X-Provider") != "original-header" {
 					t.Fatalf("HTTP error not preserved: %v", err)
 				}
-			} else if err != nil {
-				t.Fatal(err)
+			case tc.wantKind == nil:
+				if err != nil {
+					t.Fatal(err)
+				}
+			default:
+				if !errors.Is(err, tc.wantKind) {
+					t.Fatalf("want %v, got %v", tc.wantKind, err)
+				}
+				e, ok := errors.AsType[*Error](err)
+				if !ok {
+					t.Fatalf("want *Error, got %T", err)
+				}
+				if !bytes.Equal(e.Body, []byte(tc.body)) {
+					t.Fatalf("body=%q, want %q", e.Body, tc.body)
+				}
+				if tc.code != "" {
+					if e.Code != tc.code {
+						t.Fatalf("code=%q: %v", e.Code, err)
+					}
+					wantMessage := fmt.Sprintf("%s code=%s", tc.wantKind, tc.code)
+					if tc.body != "" {
+						wantMessage += " body=" + tc.body
+					}
+					if err.Error() != wantMessage {
+						t.Fatalf("message=%q, want %q", err.Error(), wantMessage)
+					}
+				}
+				if tc.wantKind != nil && tc.body != "" && !strings.Contains(err.Error(), tc.body) {
+					t.Fatalf("raw body missing from error string: %v", err)
+				}
 			}
 			if calls.Load() != 1 {
 				t.Fatal("request retried")
 			}
 		})
+	}
+	client, err := New(cfg, WithHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return jsonResponse(200, successEnvelope), nil
+	})}), WithJSONCodec(&countingCodec{decodeErr: true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.GetPhoneNumber(t.Context(), Request{AccessToken: "t", OpenID: "o"})
+	if !errors.Is(err, ErrInvalidResponse) || strings.Contains(fmt.Sprint(err), "private-phone-and-key") {
+		t.Fatalf("decode failure: %v", err)
+	}
+	if e, ok := errors.AsType[*Error](err); !ok || !bytes.Equal(e.Body, []byte(successEnvelope)) {
+		t.Fatalf("decode failure body lost: %q", e.Body)
 	}
 	for _, status := range []int{200, 500} {
 		client, err := New(cfg, WithHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -303,8 +337,8 @@ func TestResponseAndErrorPassthrough(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		data, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "t", OpenID: "o"})
-		if data != nil || !errors.Is(err, httpc.ErrResponseTooLarge) {
+		phone, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "t", OpenID: "o"})
+		if phone != "" || !errors.Is(err, httpc.ErrResponseTooLarge) {
 			t.Fatalf("response limit lost: %v", err)
 		}
 	}
@@ -315,7 +349,7 @@ func TestInputAndCodecFailures(t *testing.T) {
 	var calls atomic.Int32
 	hc := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		calls.Add(1)
-		return jsonResponse(200, `{"code":0,"phoneNumber":"13800000000"}`), nil
+		return jsonResponse(200, successEnvelope), nil
 	})}
 	c, err := New(cfg, WithHTTPClient(hc))
 	if err != nil {
@@ -342,8 +376,8 @@ func TestInputAndCodecFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "t", OpenID: "o"})
-	if err != errTestCodec || data != nil {
+	phone, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "t", OpenID: "o"})
+	if err != errTestCodec || phone != "" {
 		t.Fatalf("codec error changed: %v", err)
 	}
 	if calls.Load() != 0 {
@@ -359,8 +393,8 @@ func TestTransportErrorPassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "t", OpenID: "o"})
-	if data != nil || !errors.Is(err, original) {
+	phone, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "t", OpenID: "o"})
+	if phone != "" || !errors.Is(err, original) {
 		t.Fatalf("transport cause lost: %v", err)
 	}
 	if _, ok := errors.AsType[*url.Error](err); !ok {
@@ -418,10 +452,10 @@ func TestRedirectAndConcurrentCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := c.GetPhoneNumber(t.Context(), Request{AccessToken: "t", OpenID: "o"})
+	phone, err := c.GetPhoneNumber(t.Context(), Request{AccessToken: "t", OpenID: "o"})
 	httpErr, ok := errors.AsType[*httpc.HTTPError](err)
-	if !ok || httpErr.StatusCode != 307 || string(data) != "{}" {
-		t.Fatalf("redirect response lost: %v", err)
+	if !ok || httpErr.StatusCode != 307 || phone != "" {
+		t.Fatalf("redirect response lost: %q %v", phone, err)
 	}
 	if calls.Load() != 1 {
 		t.Fatal("redirect followed")
@@ -436,11 +470,13 @@ func TestRedirectAndConcurrentCalls(t *testing.T) {
 		if err := json.Unmarshal(body, &fields); err != nil {
 			return nil, err
 		}
-		want := signature([]byte(cfg.Secret), Request{AccessToken: fields["access_token"], OpenID: fields["openid"]})
-		if fields["sign"] != want {
+		if len(fields) != 2 {
+			return jsonResponse(400, "{}"), nil
+		}
+		if r.Header.Get("X-UniVerify-Sign") != signature([]byte(cfg.Secret), r.Header.Get("X-UniVerify-Timestamp"), body) {
 			t.Error("cross-request body/signature corruption")
 		}
-		return jsonResponse(200, `{"code":0,"phoneNumber":"13800000000"}`), nil
+		return jsonResponse(200, successEnvelope), nil
 	})}
 	c, err = New(cfg, WithHTTPClient(hc), WithJSONCodec(codec))
 	if err != nil {
@@ -449,110 +485,14 @@ func TestRedirectAndConcurrentCalls(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := range 32 {
 		wg.Go(func() {
-			_, err := c.GetPhoneNumber(t.Context(), Request{AccessToken: fmt.Sprint(i), OpenID: "o"})
-			if err != nil {
+			phone, err := c.GetPhoneNumber(t.Context(), Request{AccessToken: fmt.Sprint(i), OpenID: "o"})
+			if err != nil || phone != "13800000000" {
 				t.Error(err)
 			}
 		})
 	}
 	wg.Wait()
-	if codec.marshals.Load() != 32 || codec.unmarshals.Load() != 0 {
+	if codec.marshals.Load() != 32 || codec.unmarshals.Load() != 32 {
 		t.Fatal("concurrent codec counts")
-	}
-}
-
-func TestGoNodeProtocol(t *testing.T) {
-	cfg := testConfig(t)
-	const bridge = `
-const http = require('node:http');
-const {main} = require('./examples/unicloud/univerify/index.js');
-globalThis.uniCloud = {getPhoneNumber: async (args) => {
-  if (args.appid !== 'test-app' || args.provider !== 'univerify') throw new Error('bad provider args');
-  return {code: 0, phoneNumber: '13800000000'};
-}};
-const server = http.createServer(async (req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  try {
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const bytes = Buffer.concat(chunks);
-    const encoded = req.url === '/base64';
-    const result = await main({httpMethod: req.method, headers: req.headers,
-      isBase64Encoded: encoded, body: bytes.toString(encoded ? 'base64' : 'utf8')});
-    res.writeHead(200); res.end(JSON.stringify(result));
-  } catch {
-    res.writeHead(500); res.end('{}');
-  }
-});
-server.listen(0, '127.0.0.1', () => process.stdout.write('http://127.0.0.1:' + server.address().port + '\n'));
-process.stdin.resume();
-process.stdin.on('end', () => { server.close(); server.closeAllConnections(); });
-`
-	processCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 10*time.Second)
-	cmd := exec.CommandContext(processCtx, "node", "-e", bridge)
-	cmd.Env = append(os.Environ(), "UV_APP_ID=test-app", "UV_SECRET="+cfg.Secret)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		cancel()
-		t.Fatal(err)
-	}
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		cancel()
-		t.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		cancel()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := stdin.Close(); err != nil {
-			t.Error(err)
-		}
-		if err := cmd.Wait(); err != nil {
-			t.Error("Node bridge did not exit cleanly:", err)
-		}
-		cancel()
-	})
-	address, err := bufio.NewReader(stdout).ReadString('\n')
-	if err != nil {
-		t.Fatal("read Node bridge address:", err)
-	}
-	target, err := url.Parse(strings.TrimSpace(address))
-	if err != nil {
-		t.Fatal(err)
-	}
-	proxy := &httputil.ReverseProxy{Rewrite: func(r *httputil.ProxyRequest) { r.SetURL(target) }}
-	server := httptest.NewUnstartedServer(proxy)
-	server.StartTLS()
-	t.Cleanup(server.Close)
-	for _, path := range []string{"/plain", "/base64"} {
-		cfg.Endpoint = server.URL + path
-		client, err := New(cfg, WithHTTPClient(server.Client()), WithJSONCodec(&countingCodec{}))
-		if err != nil {
-			t.Fatal(err)
-		}
-		data, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "token<&=中文", OpenID: "标识"})
-		if err != nil || string(data) != "{\"code\":0,\"phoneNumber\":\"13800000000\"}" {
-			t.Fatalf("Go/Node %s: %q, %v", path, data, err)
-		}
-	}
-	cfg.Endpoint = server.URL
-	cfg.Secret = "different-secret"
-	client, err := New(cfg, WithHTTPClient(server.Client()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := client.GetPhoneNumber(t.Context(), Request{AccessToken: "token", OpenID: "openid"})
-	httpErr, ok := errors.AsType[*httpc.HTTPError](err)
-	if !ok || httpErr.StatusCode != 500 || string(data) != "{}" {
-		t.Fatalf("Go/Node error response changed: %q %v", data, err)
-	}
-}
-
-func TestCloudFunctionExample(t *testing.T) {
-	cmd := exec.CommandContext(t.Context(), "node", "--test", "examples/unicloud/univerify/index.test.js")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("cloud function tests: %v\n%s", err, output)
 	}
 }
